@@ -1,0 +1,502 @@
+# reports.py
+# -*- coding: utf-8 -*-
+from typing import Dict, List, Tuple, Optional
+import numpy as np
+import os
+from PIL import Image
+import io
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+
+def build_action_catalog(meta: Dict, dataset: Dict) -> Dict[int, str]:
+    """
+    优先级：
+      1) meta['action_map'] {int->name}
+      2) meta['action_names'] [str,...]
+      3) 从数据中推断 unique action id => "Action <id>"
+    """
+    # 1) 显式 action_map
+    if isinstance(meta, dict) and isinstance(meta.get('action_map'), dict):
+        # 规范化 key => int
+        return {int(k): str(v) for k, v in meta['action_map'].items()}
+
+    # 2) action_names 列表
+    if isinstance(meta, dict) and isinstance(meta.get('action_names'), (list, tuple)):
+        return {i: str(name) for i, name in enumerate(meta['action_names'])}
+
+    # 3) 从数据推断
+    actions = None
+    for k in ('actions', 'action', 'y_action', 'a'):
+        if k in dataset and dataset[k] is not None:
+            actions = dataset[k]
+            break
+    if actions is None:
+        # 最保守：默认 0,1
+        return {0: 'Action 0', 1: 'Action 1'}
+
+    ids = sorted(set(map(int, np.array(actions).reshape(-1))))
+    return {i: f'Action {i}' for i in ids}
+
+def _q_values_from_ensemble(state: np.ndarray, model_handles: Dict) -> Optional[np.ndarray]:
+    """
+    尝试从在线的 q_ensemble 拿一帧 Q(s,·)
+    model_handles:
+      - 'q_ensemble' : torch.nn.Module
+      - 'device'     : str
+    """
+    try:
+        import torch
+        q_ens = model_handles.get('q_ensemble', None)
+        if q_ens is None:
+            return None
+        x = torch.as_tensor(state, dtype=torch.float32, device=model_handles.get('device', 'cpu'))
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+        with torch.no_grad():
+            # q_ensemble(x) -> (batch, action_dim) 或 (K,batch,action_dim) 看你的实现
+            out = q_ens(x)
+            if hasattr(out, 'shape') and out.ndim == 2:
+                return out.cpu().numpy()[0]  # (A,)
+            if out.ndim == 3:
+                # (K,B,A) => 均值
+                return out.mean(dim=0).cpu().numpy()[0]
+        return None
+    except Exception:
+        return None
+
+def _scores_from_policy_only(state: np.ndarray, model_handles: Dict, action_dim: int) -> np.ndarray:
+    """
+    当只有 BCQ (或 DQN baseline) 只能 predict 动作时，构造一个“伪分数”：
+    预测动作给 1.0，其它给 0.5 / 0.2 衰减，目的是在报告里能排个序+展示相对优势。
+    """
+    try:
+        # 先试 bcq_online_trainer
+        bcq = model_handles.get('bcq_trainer', None)
+        if bcq:
+            a = int(bcq.predict(state))
+            s = np.full(action_dim, 0.2, dtype=np.float32)
+            s[a] = 1.0
+            return s
+        # 再试 baseline algo
+        base = model_handles.get('baseline_trainer', None)
+        if base:
+            a = int(base.predict(state))
+            s = np.full(action_dim, 0.2, dtype=np.float32)
+            s[a] = 1.0
+            return s
+    except Exception:
+        pass
+    return np.zeros(action_dim, dtype=np.float32)
+
+def _estimate_uncertainty(state: np.ndarray, model_handles: Dict) -> float:
+    """
+    与 StreamActiveLearner/UncertaintySampler 的逻辑保持一致：
+      - 若使用 BCQ：用状态方差代理，再映射到 [0,1]
+      - 否则：如果能拿到 ensemble 的 (K,B,A) 则用方差/变异系数 + tanh 压缩
+      - 最后兜底 0.1
+    """
+    try:
+        # 优先尝试从 sampler 拿
+        sampler = model_handles.get('uncertainty_sampler', None)
+        if sampler and hasattr(sampler, 'get_uncertainty'):
+            return float(sampler.get_uncertainty(state))
+    except Exception:
+        pass
+
+    # 简化兜底：与 samplers.py 中 BCQ 的近似一致
+    try:
+        import numpy as np
+        return float(min(1.0, max(0.0, np.var(state) * 10.0)))
+    except Exception:
+        return 0.1
+
+def compute_recommendation(state: np.ndarray,
+                           model_handles: Dict,
+                           action_catalog: Dict[int, str],
+                           meta: Dict,
+                           topk: int = 3) -> Dict:
+    """
+    返回:
+      {
+        'ranked': [(aid, name, score), ...],
+        'uncertainty': float,
+        'q_span': float,  # top 与 次优 的差
+        'action_dim': int
+      }
+    """
+    # 先尝试 ensemble 的真实 Q
+    q = _q_values_from_ensemble(state, model_handles)
+    if q is None:
+        # 退化：用 policy-only 的打分
+        action_dim = len(action_catalog) if action_catalog else 2
+        q = _scores_from_policy_only(state, model_handles, action_dim)
+    else:
+        action_dim = q.shape[0]
+
+    # 排序
+    idx = np.argsort(-q)  # desc
+    ranked = []
+    for i in idx[:min(topk, len(idx))]:
+        ranked.append((int(i), action_catalog.get(int(i), f'Action {i}'), float(q[i])))
+
+    # 不确定性（对报告用）
+    u = _estimate_uncertainty(state, model_handles)
+    q_span = float(q[idx[0]] - q[idx[1]]) if len(idx) > 1 else float(q[idx[0]])
+
+    return {'ranked': ranked, 'uncertainty': u, 'q_span': q_span, 'action_dim': int(action_dim)}
+
+def _eval_critical_rules(state: np.ndarray, meta: Dict) -> List[str]:
+    """
+    评估 schema/meta 中的 'critical_features' 规则（之前在 adapters/schema 已支持）
+    期望 meta['critical_features'] 是列表： [{'feature':'SpO2','op':'<','value':0.9,'message':'...'}, ...]
+    如果只有 feature index，则使用 meta['feature_columns'] 做回填
+    """
+    msgs = []
+    rules = meta.get('critical_features') or []
+    feat_cols = meta.get('feature_columns') or []
+    name_to_idx = {n: i for i, n in enumerate(feat_cols)}
+
+    for r in rules:
+        try:
+            f = r.get('feature')
+            idx = name_to_idx.get(f) if isinstance(f, str) else int(f)
+            val = float(state[idx])
+            op = r.get('op', '<')
+            thr = float(r.get('value', 0))
+            ok = (val < thr) if op == '<' else (val > thr) if op == '>' else False
+            if ok:
+                msgs.append(r.get('message') or f"Rule: {f} {op} {thr} (val={val:.4f})")
+        except Exception:
+            continue
+    return msgs
+
+def _safety_checks(state: np.ndarray, meta: Dict) -> List[str]:
+    out = []
+    stats = meta.get('feature_stats') or {}
+    cols = meta.get('feature_columns') or []
+    for i, name in enumerate(cols):
+        info = stats.get(name) or {}
+        lo, hi = info.get('min', None), info.get('max', None)
+        try:
+            v = float(state[i])
+            if lo is not None and v < lo:
+                out.append(f"{name} below min ({v:.4f} < {lo})")
+            if hi is not None and v > hi:
+                out.append(f"{name} above max ({v:.4f} > {hi})")
+        except Exception:
+            pass
+    return out
+
+def render_patient_report(patient: Dict,
+                          state: np.ndarray,
+                          rec: Dict,
+                          meta: Dict,
+                          action_catalog: Dict[int, str]) -> str:
+    """
+    统一渲染 Markdown 报告
+    """
+    pid = patient.get('id') or patient.get('trajectory_id') or 'N/A'
+    cols = meta.get('feature_columns') or [f'feat{i}' for i in range(len(state))]
+    pairs = ", ".join([f"{c}={float(state[i]):.4f}" for i, c in enumerate(cols[: min(8, len(cols))])])
+
+    # 触发规则与安全检查
+    fired = _eval_critical_rules(state, meta)
+    safety = _safety_checks(state, meta)
+
+    # 推荐段
+    lines = []
+    lines.append(f"# Patient Report (ID: {pid})\n")
+    lines.append("## Snapshot")
+    lines.append(f"- Latest {len(cols)} features (first 8 shown): {pairs}")
+    lines.append(f"- Uncertainty: **{rec['uncertainty']:.3f}**")
+    lines.append("")
+
+    lines.append("## Recommendations")
+    for rank, (aid, name, score) in enumerate(rec['ranked'], 1):
+        lines.append(f"{rank}. **{name}**  \n   - Score: {score:.4f}")
+
+    if rec.get('q_span') is not None:
+        lines.append(f"- Advantage over next best: **{rec['q_span']:.4f}**")
+    lines.append("")
+
+    if fired:
+        lines.append("## Triggered Clinical Rules")
+        for m in fired[:10]:
+            lines.append(f"- {m}")
+        lines.append("")
+    if safety:
+        lines.append("## Safety Checks")
+        for m in safety[:10]:
+            lines.append(f"- {m}")
+        lines.append("")
+    lines.append("## Notes")
+    lines.append("- This report is generated from your uploaded schema & data; action labels are dynamic.")
+    return "\n".join(lines)
+
+def _safe_float(x, default=0.0):
+    try:
+        v = float(x)
+        if math.isnan(v) or math.isinf(v):
+            return default
+        return v
+    except Exception:
+        return default
+
+def render_patient_report_md(patient: Dict, analysis: Dict, cohort_stats: Optional[Dict] = None) -> str:
+    pid = str(patient.get('patient_id', 'Unknown'))
+    state = patient.get('current_state', {})
+    rec = (analysis or {}).get('recommendation', {}) or {}
+    rec_name = str(rec.get('recommended_treatment', 'Unknown'))
+    conf = _safe_float(rec.get('confidence', 0.0))
+    exp_out = _safe_float(rec.get('expected_immediate_outcome', 0.0))
+
+    # Top-K 对比（若有）
+    all_opts = (analysis or {}).get('all_options', {}) or {}
+    avs = all_opts.get('action_values') or []
+    # 排序（按 q 或 outcome）
+    def _score(av):
+        return _safe_float(av.get('q_value', av.get('expected_outcome', 0.0)))
+    avs_sorted = sorted(avs, key=_score, reverse=True)[:5]
+
+    lines = []
+    lines.append(f"# 患者报告（ID: {pid}）")
+    lines.append("")
+    lines.append("## 一、当前状态概览")
+    if state:
+        # 取前若干关键值
+        keys = list(state.keys())
+        keys = keys[: min(12, len(keys))]
+        for k in keys:
+            v = state[k]
+            try:
+                if isinstance(v, float):
+                    lines.append(f"- **{k}**：{v:.3f}")
+                else:
+                    lines.append(f"- **{k}**：{v}")
+            except Exception:
+                lines.append(f"- **{k}**：{v}")
+    else:
+        lines.append("- 暂无结构化状态信息")
+
+    lines.append("")
+    lines.append("## 二、治疗建议")
+    lines.append(f"- **推荐**：{rec_name}")
+    lines.append(f"- **信心**：{conf:.3f}")
+    lines.append(f"- **期望即时收益/结局**：{exp_out:.3f}")
+
+    if avs_sorted:
+        lines.append("")
+        lines.append("### 候选方案排序（前 5）")
+        for i, av in enumerate(avs_sorted, 1):
+            nm = str(av.get('action', f'Option-{i}'))
+            qv = _safe_float(av.get('q_value', av.get('expected_outcome', 0.0)))
+            lines.append(f"{i}. {nm}（评分 {qv:.3f}）")
+
+    # 关键驱动因素（若 explain 返回）
+    abn = (analysis or {}).get('abnormal_features') or []
+    if abn:
+        lines.append("")
+        lines.append("## 三、关键影响因素")
+        for item in abn[:10]:
+            feat = str(item.get('feature'))
+            val = _safe_float(item.get('value', 0.0))
+            status = item.get('status', '')
+            lines.append(f"- {feat}：{status}（{val:.3f}）")
+
+    # 反事实对比（若有）
+    cf = (analysis or {}).get('counterfactuals') or {}
+    if cf:
+        lines.append("")
+        lines.append("## 四、反事实评估（不同治疗的长期收益）")
+        # 只展示均值
+        # 格式：治疗：均值（5%-95%）
+        for k, v in cf.items():
+            mean = _safe_float(v.get('mean_outcome', 0.0))
+            ci = v.get('confidence_interval', [None, None])
+            lo = _safe_float(ci[0], default=mean)
+            hi = _safe_float(ci[1], default=mean)
+            lines.append(f"- {k}：{mean:.3f}（95%CI {lo:.3f} ~ {hi:.3f}）")
+
+    # 安全校验（若有）
+    sc = rec.get('safety_check')
+    if isinstance(sc, dict):
+        lines.append("")
+        lines.append("## 五、用药安全校验")
+        ok = sc.get('approved', True)
+        reason = sc.get('reason', '无')
+        alt = sc.get('alternative')
+        lines.append(f"- 通过：{'是' if ok else '否'}；原因：{reason}")
+        if (not ok) and alt:
+            lines.append(f"- 已切换安全备选：{alt}")
+
+    # 队列/队群统计（可选）
+    if isinstance(cohort_stats, dict) and cohort_stats:
+        lines.append("")
+        lines.append("## 六、队列统计（简要）")
+        tp = int(cohort_stats.get('total_patients', 0))
+        tr = int(cohort_stats.get('total_records', 0))
+        lines.append(f"- 总患者数：{tp}")
+        lines.append(f"- 总记录数：{tr}")
+
+    lines.append("")
+    lines.append("> 说明：报告为模型推理与仿真所得，不替代临床判断。")
+    return "\n".join(lines)
+
+def make_treatment_analysis_figure(analysis: Dict) -> Image.Image:
+    """
+    生成稳健的治疗分析图（PIL Image），包括动作评分柱状图 + 7步轨迹预览。
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    # 左：动作评分
+    ax = axes[0]
+    all_opts = (analysis or {}).get('all_options') or {}
+    avs = all_opts.get('action_values') or []
+    rec_action = (analysis or {}).get('recommendation', {}).get('recommended_action', '')
+    if avs:
+        acts = []
+        vals = []
+        cols = []
+        for av in avs:
+            a = str(av.get('action', 'A?'))
+            q = _safe_float(av.get('q_value', av.get('expected_outcome', 0.0)))
+            acts.append(a)
+            vals.append(q)
+            cols.append('tomato' if a == rec_action else 'steelblue')
+        ax.bar(range(len(acts)), vals, color=cols, alpha=0.85)
+        ax.set_xticks(range(len(acts)))
+        ax.set_xticklabels(acts, rotation=30, ha='right')
+        ax.set_title('Treatment Options')
+        ax.set_ylabel('Score')
+    else:
+        ax.axis('off')
+        ax.text(0.5, 0.5, 'No action values', ha='center', va='center')
+
+    # 右：7步轨迹
+    ax = axes[1]
+    traj = ((analysis or {}).get('predicted_trajectory') or {}).get('trajectory') or []
+    traj = traj[:7]
+    if traj:
+        steps = list(range(len(traj)))
+        # 尝试取常见两项：glucose / oxygen_saturation；找不到就取第 0 与最后一维
+        def _pick(dct, key, fallback):
+            v = dct.get(key, fallback)
+            return _safe_float(v, default=fallback)
+        g = []
+        o = []
+        last_g, last_o = 0.5, 0.95
+        for t in traj:
+            st = t.get('state', {})
+            gv = st.get('glucose', last_g)
+            ov = st.get('oxygen_saturation', last_o)
+            gv = _safe_float(gv, default=last_g); ov = _safe_float(ov, default=last_o)
+            g.append(gv); o.append(ov)
+            last_g, last_o = gv, ov
+        ax2 = ax.twinx()
+        l1 = ax.plot(steps, g, marker='o', label='Glucose')
+        l2 = ax2.plot(steps, o, marker='s', linestyle='--', label='O2 Sat')
+        ax.set_xlabel('Step'); ax.set_ylabel('Glucose')
+        ax2.set_ylabel('O2 Sat')
+        ax.set_title('7-step Projection')
+        lines = l1 + l2
+        labels = [l.get_label() for l in lines]
+        ax.legend(lines, labels, loc='best')
+        ax.grid(alpha=0.3)
+    else:
+        ax.axis('off')
+        ax.text(0.5, 0.5, 'No trajectory', ha='center', va='center')
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=140, bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+    return Image.open(buf)
+
+
+# def render_patient_report_md(patient: Dict, analysis: Dict, cohort_stats: Optional[Dict] = None) -> str:
+#     pid = str(patient.get('patient_id', 'Unknown'))
+#     state = patient.get('current_state', {})
+#     rec = (analysis or {}).get('recommendation', {}) or {}
+#     rec_name = str(rec.get('recommended_treatment', 'Unknown'))
+#     conf = _safe_float(rec.get('confidence', 0.0))
+#     exp_out = _safe_float(rec.get('expected_immediate_outcome', 0.0))
+
+#     lines = [f"# 患者报告（ID: {pid}）", "", "## 当前状态（部分）"]
+#     for k in list(state.keys())[:12]:
+#         v = state[k]
+#         try:
+#             lines.append(f"- **{k}**：{float(v):.3f}")
+#         except Exception:
+#             lines.append(f"- **{k}**：{v}")
+
+#     lines += ["", "## 治疗建议",
+#               f"- **推荐**：{rec_name}",
+#               f"- **置信度**：{conf:.3f}",
+#               f"- **期望即时收益/结局**：{exp_out:.3f}"]
+
+#     avs = ((analysis or {}).get('all_options') or {}).get('action_values') or []
+#     if avs:
+#         lines += ["", "### 候选方案（按分数降序）"]
+#         def _score(av): return _safe_float(av.get('q_value', av.get('expected_outcome', 0.0)))
+#         for i, av in enumerate(sorted(avs, key=_score, reverse=True)[:5], 1):
+#             nm = str(av.get('action', f'Option-{i}'))
+#             sc = _score(av)
+#             lines.append(f"{i}. {nm}（评分 {sc:.3f}）")
+
+#     abn = (analysis or {}).get('abnormal_features') or []
+#     if abn:
+#         lines += ["", "## 关键影响因素"]
+#         for it in abn[:10]:
+#             lines.append(f"- {it.get('feature')}：{it.get('status','')}（{_safe_float(it.get('value'),0.0):.3f}）")
+
+#     cf = (analysis or {}).get('counterfactuals') or {}
+#     if cf:
+#         lines += ["", "## 反事实评估（长期）"]
+#         for k, v in cf.items():
+#             mean = _safe_float(v.get('mean_outcome', 0.0))
+#             lo, hi = v.get('confidence_interval', [mean, mean])
+#             lines.append(f"- {k}：{mean:.3f}（95%CI {_safe_float(lo,mean):.3f} ~ {_safe_float(hi,mean):.3f}）")
+
+#     lines += ["", "> 说明：报告为模型推理与仿真所得，不替代临床判断。"]
+#     return "\n".join(lines)
+
+# def make_treatment_analysis_figure(analysis: Dict) -> Image.Image:
+#     fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+#     # 左：动作评分
+#     ax = axes[0]
+#     avs = ((analysis or {}).get('all_options') or {}).get('action_values') or []
+#     rec_action = (analysis or {}).get('recommendation', {}).get('recommended_action', '')
+#     if avs:
+#         acts = [str(av.get('action','A?')) for av in avs]
+#         vals = [_safe_float(av.get('q_value', av.get('expected_outcome', 0.0))) for av in avs]
+#         cols = ['tomato' if a == rec_action else 'steelblue' for a in acts]
+#         ax.bar(range(len(acts)), vals, color=cols, alpha=0.85)
+#         ax.set_xticks(range(len(acts))); ax.set_xticklabels(acts, rotation=30, ha='right')
+#         ax.set_title('Treatment Options'); ax.set_ylabel('Score')
+#     else:
+#         ax.axis('off'); ax.text(0.5,0.5,'No action values',ha='center',va='center')
+
+#     # 右：7步轨迹
+#     ax = axes[1]
+#     traj = (((analysis or {}).get('predicted_trajectory') or {}).get('trajectory') or [])[:7]
+#     if traj:
+#         steps = list(range(len(traj)))
+#         def pick(st, key, last): 
+#             v = _safe_float(st.get(key,last), last); return v
+#         g, o = [], []; last_g, last_o = 0.5, 0.95
+#         for t in traj:
+#             st = t.get('state', {})
+#             gv = pick(st,'glucose', last_g); ov = pick(st,'oxygen_saturation', last_o)
+#             g.append(gv); o.append(ov); last_g, last_o = gv, ov
+#         ax2 = ax.twinx()
+#         l1 = ax.plot(steps, g, marker='o', label='Glucose')
+#         l2 = ax2.plot(steps, o, marker='s', linestyle='--', label='O2 Sat')
+#         ax.set_xlabel('Step'); ax.set_ylabel('Glucose'); ax2.set_ylabel('O2 Sat'); ax.set_title('7-step Projection')
+#         lines = l1 + l2; labels = [l.get_label() for l in lines]; ax.legend(lines, labels, loc='best'); ax.grid(alpha=0.3)
+#     else:
+#         ax.axis('off'); ax.text(0.5,0.5,'No trajectory',ha='center',va='center')
+
+#     import io
+#     buf = io.BytesIO(); plt.tight_layout(); plt.savefig(buf, format='png', dpi=140, bbox_inches='tight'); buf.seek(0); plt.close(fig)
+#     return Image.open(buf)

@@ -1,0 +1,30 @@
+data_type: sensor
+mapping:
+  trajectory_id: subject
+  timestep: frame
+  action: null
+  reward: null
+  terminal: null
+  feature_cols: [acc_x, acc_y, acc_z]
+
+window:
+  enabled: true
+  length: 50
+  stride: 10
+  label_col: activity
+  label_to_action: {"rest": 0, "walk": 1, "run": 2}
+
+reward_spec:
+  expression: "-(abs(acc_x)+abs(acc_y)+abs(acc_z))/3.0"
+  window_agg: mean
+
+critical_features:
+  - name_or_aliases: acc_z
+    op: "<="
+    threshold: 2.0
+    weight: 0.5
+    as_terminal: false
+    display_name: "ACC_Z"
+
+normalization:
+  method: standard

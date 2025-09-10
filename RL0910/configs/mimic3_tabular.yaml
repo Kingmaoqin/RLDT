@@ -1,0 +1,33 @@
+data_type: tabular
+mapping:
+  trajectory_id: subject_id
+  timestep: visit
+  action: action_id
+  reward: reward
+  terminal: terminal
+  feature_cols: [HR, MAP, SBP, DBP, RR, TEMP, SPO2, CREATININE, BILIRUBIN, PLATELET, LACTATE, FLUID_ML, sofa_approx]
+
+critical_features:
+  - name_or_aliases: MAP
+    op: ">="
+    threshold: 65
+    weight: 1.5
+    as_terminal: false
+    display_name: "MAP"
+  - name_or_aliases: SPO2
+    op: ">="
+    threshold: 0.92
+    weight: 2.0
+    as_terminal: false
+    display_name: "SpO2"
+  - name_or_aliases: sofa_approx
+    op: "<="
+    threshold: 5
+    weight: 1.0
+    as_terminal: false
+    display_name: "SOFA~"
+
+normalization:
+  method: standard
+
+action_names: ["none","fluid_only","vaso_only","fluid+vaso"]

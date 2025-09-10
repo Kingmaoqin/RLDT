@@ -1,0 +1,26 @@
+data_type: tabular
+mapping:
+  trajectory_id: subject_id
+  timestep: visit
+  action: treatment
+  reward: outcome
+  terminal: is_last
+  feature_cols: [risk, sbp, labA, labB]
+
+# 完全通用的“重要特征”规则（演示两条）
+critical_features:
+  - name_or_aliases: risk
+    op: "<"          # 风险越低越好
+    threshold: 0.30
+    weight: 2.0
+    as_terminal: true
+    display_name: "Risk"
+  - name_or_aliases: sbp
+    op: "<="
+    threshold: 140
+    weight: 1.0
+    as_terminal: false
+    display_name: "SBP"
+
+normalization:
+  method: standard

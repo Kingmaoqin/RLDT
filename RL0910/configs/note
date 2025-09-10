@@ -1,0 +1,4 @@
+python -m train_and_evaluate_bcq_patched \
+  --output_dir ./output_mimic_500 \
+  --data_path ./data_mimic/mimic3_trajectories.csv \
+  --schema_yaml ./configs/mimic3_tabular.yaml
