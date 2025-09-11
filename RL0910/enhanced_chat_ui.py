@@ -442,8 +442,7 @@ def create_gradio_interface():
                 current_source_text = gr.Textbox(label="Active Source", interactive=False)
                 stats_display = gr.Image(label="Dataset Statistics", interactive=False)
                 action_legend = gr.HTML(label="Action Legend", visible=False)
-                patient_dropdown = gr.Dropdown(label="Select Patient", choices=[], value=None)
-                                
+
                 # Patient selection
                 gr.Markdown("### Patient Selection")
                 with gr.Row():
