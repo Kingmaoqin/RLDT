@@ -808,12 +808,12 @@ def get_all_action_values(patient_state: dict) -> dict:
                             qs_list.append(q_val)
                         qs = np.array(qs_list, dtype=np.float32)
                 scores = qs
-            if scores is None:
-                scores = (
-                    _scores_from_policy_only(state_array, MODEL_HANDLES, action_dim)
-                    if _scores_from_policy_only
-                    else np.zeros(action_dim, dtype=np.float32)
+            if scores is None and _scores_from_policy_only:
+                scores = _scores_from_policy_only(
+                    state_array, MODEL_HANDLES, action_dim
                 )
+            if scores is None:
+                return {"error": str(e)}
             if not isinstance(scores, np.ndarray):
                 scores = np.array(scores, dtype=np.float32)
             action_values = []
@@ -1395,28 +1395,7 @@ def analyze_patient(patient_id: str) -> dict:
         fallback_warning = None
         if action_values.get("error"):
             fallback_warning = action_values.get("error")
-            try:
-                state_vec = _state_to_vec(
-                    patient_state,
-                    state_dim=getattr(_inference_engine, "state_dim", 10),
-                )
-                action_dim = getattr(
-                    _inference_engine, "action_dim", len(ACTION_CATALOG) or 2
-                )
-                scores = _scores_from_policy_only(state_vec, MODEL_HANDLES, action_dim)
-                ranked_idx = list(np.argsort(-scores))
-                action_values = {
-                    "action_values": [
-                        {
-                            "action": ACTION_CATALOG.get(i, f"Action {i}"),
-                            "q_value": float(scores[i]),
-                        }
-                        for i in ranked_idx
-                    ]
-                }
-            except Exception as e_fallback:
-                action_values = {"action_values": []}
-                fallback_warning = f"{fallback_warning}; fallback failed: {e_fallback}"
+            action_values = {"action_values": []}
         
         # Simulate short-term trajectory
         if recommendation.get("recommended_action") is not None:

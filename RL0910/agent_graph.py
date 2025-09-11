@@ -144,14 +144,17 @@ class EnhancedDriveAgent:
             # 获取治疗推荐和不确定性
             recommendation = get_optimal_recommendation(patient_context)
             all_actions = get_all_action_values(patient_context)
-            
+            action_rankings = all_actions.get('action_values', [])
+
             insights = {
                 'primary_recommendation': recommendation,
-                'action_rankings': all_actions.get('action_values', []),
+                'action_rankings': action_rankings,
                 'confidence_level': recommendation.get('confidence', 0),
                 'uncertainty_estimate': self._calculate_uncertainty(all_actions),
                 'risk_assessment': self._assess_clinical_risk(patient_context)
             }
+            if all_actions.get('error'):
+                insights['action_values_error'] = all_actions['error']
             
         except Exception as e:
             insights = {'error': str(e)}
