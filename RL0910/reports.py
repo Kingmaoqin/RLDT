@@ -557,11 +557,19 @@ def render_patient_report_html(patient: Dict,
     explanation = ""
     if avs_sorted:
         best = avs_sorted[0]
-        best_name = action_catalog.get(int(best.get('action', -1)), 'Unknown')
+        best_act = best.get('action', 'Unknown')
+        if isinstance(best_act, (int, float)):
+            best_name = action_catalog.get(int(best_act), 'Unknown')
+        else:
+            best_name = str(best_act)
         best_score = _score(best)
         if len(avs_sorted) > 1:
             second = avs_sorted[1]
-            second_name = action_catalog.get(int(second.get('action', -1)), 'Unknown')
+            second_act = second.get('action', 'Unknown')
+            if isinstance(second_act, (int, float)):
+                second_name = action_catalog.get(int(second_act), 'Unknown')
+            else:
+                second_name = str(second_act)
             diff = best_score - _score(second)
             explanation = (f"Model favors <strong>{_html_escape(best_name)}</strong> "
                             f"(score {best_score:.3f}), outperforming { _html_escape(second_name) } "
