@@ -1417,11 +1417,11 @@ def load_data_source(source_type: str,
                 )
             else:
                 df = data_manager.load_real_data_schema_less(file_path)
-
+            data_manager.set_data_source("real")
             # 同步 meta 到推理引擎（供报告与在线使用）
-            meta = getattr(data_manager, "current_meta", {}) or {}
+            meta = data_manager.get_current_meta()
             try:
-                eng = globals().get("INFERENCE_ENGINE", None)
+                eng = globals().get("_inference_engine", None) or globals().get("INFERENCE_ENGINE", None)
                 if eng is not None:
                     eng.meta = meta
                     if meta.get("feature_columns"):
@@ -1430,63 +1430,28 @@ def load_data_source(source_type: str,
                         eng.action_names = meta["action_names"]
             except Exception as _e:
                 print(f"[WARN] inject meta failed: {_e}")
+            global CURRENT_META, CURRENT_SCHEMA, ACTION_CATALOG, _feature_keys
+            CURRENT_META = meta
+            CURRENT_SCHEMA = getattr(data_manager, "current_schema", {}) or {}
+            _feature_keys = list(CURRENT_META.get("feature_columns", []))
 
+            # 动作目录：优先取 meta 的 id->name；否则从数据中推断
+            act_map = CURRENT_META.get("action_id_to_name") or CURRENT_META.get("action_catalog")
+            if isinstance(act_map, dict) and act_map:
+                ACTION_CATALOG = {int(k): str(v) for k, v in act_map.items()}
+            else:
+                labels = [str(a) for a in sorted(df["action"].unique())] if "action" in df.columns else []
+                ACTION_CATALOG = {i: labels[i] for i in range(len(labels))}
             # 返回基本统计（供 UI 顶部状态条）
             patients = df["patient_id"].nunique() if "patient_id" in df.columns else 0
-            return {"status": "success", "patients": int(patients), "records": int(len(df))}
-        # 加载真实数据（传入 schema）
-        if schema_path or schema_yaml:
-            df = data_manager.load_real_data_with_schema(
-                file_path=file_path,
-                file_type=file_type,
-                schema_path=schema_path,
-                schema_yaml=schema_yaml
-            )
+            return {
+                "status": "success",
+                "message": f"Loaded real data from {file_path}",
+                "records": len(df),
+                "patients": int(patients),
+            }
         else:
-            # 维持老行为（不推荐，没有统一结构）
-            df = data_manager.load_real_data(file_path, file_type)
-
-        data_manager.set_data_source("real")
-
-        # 把 meta 注入推理引擎（否则报告用的是旧动作名/旧阈值）
-        meta = getattr(data_manager, "current_meta", {}) or {}
-        try:
-            from inference import DigitalTwinInference
-            eng = globals().get("_inference_engine", None) or globals().get("INFERENCE_ENGINE", None)
-            if eng is not None:
-                eng.meta = meta
-                if meta.get("feature_names"):
-                    eng.feature_names = meta["feature_names"]
-                if meta.get("action_names"):
-                    eng.action_names = meta["action_names"]
-        except Exception as _e:
-            print(f"[WARN] inject meta into inference failed: {_e}")
-
-        # 取出 meta/schema 并注册到全局
-        global CURRENT_META, CURRENT_SCHEMA, ACTION_CATALOG, _feature_keys
-        CURRENT_META = data_manager.get_current_meta()    # 要求 data_manager 暴露该接口；若已有名称不同，请在 data_manager 内增设同义方法
-        CURRENT_SCHEMA = data_manager.get_current_schema() or {}
-
-        # 特征列顺序用于 _state_to_vec
-        _feature_keys = list(CURRENT_META.get('feature_columns', []))
-
-        # 动作目录：优先取 meta 的 id->name；否则从观测中唯一动作集合自动构建
-        act_map = CURRENT_META.get('action_id_to_name') or CURRENT_META.get('action_catalog')
-        if isinstance(act_map, dict) and act_map:
-            ACTION_CATALOG = {int(k): str(v) for k, v in act_map.items()}
-        else:
-            # fallback：从数据中推断
-            uniq = data_manager.get_unique_actions()  # 要求 data_manager 提供，或返回列表/Series
-            labels = [str(u) for u in uniq]
-            ACTION_CATALOG = {i: labels[i] for i in range(len(labels))}
-
-        data_manager.set_data_source("real")
-        return {
-            "status": "success",
-            "message": f"Loaded real data from {file_path}",
-            "records": len(df),
-            "patients": df['patient_id'].nunique() if 'patient_id' in df.columns else len(df)
-        }
+            return {"error": f"Unsupported data source: {source_type}"}
             
     except Exception as e:
         return {"error": str(e)}
@@ -1611,7 +1576,7 @@ def get_cohort_stats() -> dict:
         n_actions = 0
 
     # 动作名称映射（供前端显示）
-    meta = getattr(data_manager, "current_meta", {}) or {}
+    meta = data_manager.get_current_meta()
     id2name = meta.get("action_map") or {i: n for i, n in enumerate(meta.get("action_names") or [])}
     action_names = {int(k): str(v) for k, v in (id2name or {}).items()}
 
@@ -1652,7 +1617,7 @@ def get_action_catalog() -> dict:
     """返回 {action_id: action_name}，优先使用 meta；否则从数据里推断。"""
     from data_manager import data_manager
     import numpy as np
-    meta = getattr(data_manager, "current_meta", {}) or {}
+    meta = data_manager.get_current_meta()
     id2name = meta.get("action_map")
     if not id2name:
         names = meta.get("action_names") or []
@@ -1709,7 +1674,7 @@ def generate_patient_report_ui(patient_id: str, topk: int = 3, fmt: str = "html"
             dataset_shim = {"actions": df["action"].values if (df is not None and "action" in df.columns) else None}
         except Exception:
             dataset_shim = {"actions": None}
-        action_catalog = build_action_catalog(getattr(data_manager, "current_meta", {}) or {}, dataset_shim)
+        action_catalog = build_action_catalog(data_manager.get_current_meta(), dataset_shim)
 
         if fmt == "html":
             from reports import render_patient_report_html
