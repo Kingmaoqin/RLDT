@@ -1618,10 +1618,15 @@ def get_action_catalog() -> dict:
     from data_manager import data_manager
     import numpy as np
     meta = data_manager.get_current_meta()
-    id2name = meta.get("action_map")
-    if not id2name:
-        names = meta.get("action_names") or []
-        id2name = {i: str(n) for i, n in enumerate(names)} if names else {}
+    raw_map = meta.get("action_map") or {
+        i: n for i, n in enumerate(meta.get("action_names") or [])
+    }
+    id2name: Dict[int, str] = {}
+    for k, v in (raw_map or {}).items():
+        name = str(v).strip()
+        if not name:
+            name = f"Action {int(k)}"
+        id2name[int(k)] = name
     # 如仍为空，从当前数据集推断 id 集合
     try:
         df = data_manager.get_current_data()
@@ -1638,12 +1643,16 @@ def get_action_legend_html() -> str:
     id2name = get_action_catalog()
     if not id2name:
         return ""
-    rows = "\n".join([f"<tr><td>{int(k)}</td><td>{str(v)}</td></tr>" for k, v in sorted(id2name.items())])
+    row_tpl = "<tr><td style='border:1px solid #ccc;padding:4px;'>{}</td>" \
+              "<td style='border:1px solid #ccc;padding:4px;'>{}</td></tr>"
+    rows = "\n".join([row_tpl.format(int(k), str(v)) for k, v in sorted(id2name.items())])
     return f"""
-    <div class='card'>
-      <h4>Action Legend</h4>
-      <table><thead><tr><th>ID</th><th>Name</th></tr></thead>
-      <tbody>{rows}</tbody></table>
+    <div style="background:#fff;color:#000;padding:12px;border:1px solid #e6ecf5;" >
+      <h4 style="margin-top:0;">Action Legend</h4>
+      <table style="border-collapse:collapse;width:100%;">
+        <thead><tr><th style="border:1px solid #ccc;padding:4px;">ID</th>
+        <th style="border:1px solid #ccc;padding:4px;">Name</th></tr></thead>
+        <tbody>{rows}</tbody></table>
     </div>
     """
 
@@ -1700,71 +1709,4 @@ def generate_patient_report_ui(patient_id: str, topk: int = 3, fmt: str = "html"
             return md, fig, None
     except Exception as e:
         return f"<p>Report error: {e}</p>", None, None
-
-
-
-from reports import render_patient_report_md, make_treatment_analysis_figure
-
-
-# def generate_patient_report_ui(patient_id: str, topk: int = 3) -> Tuple[str, Image.Image]:
-#     """
-#     供 UI 调用：基于当前 data_manager 的元数据与在线模型，生成报告文本 + 图像
-#     """
-#     # 1) 取病人信息与 meta
-#     info = data_manager.get_patient_info(patient_id)
-#     meta = getattr(data_manager, "current_meta", {}) or {}
-#     feat_cols = meta.get("feature_columns") or meta.get("feature_names") or []
-
-#     # 2) 将 current_state（dict）按列顺序向量化
-#     st = info.get("current_state", {}) or {}
-#     vec = np.array([float(st.get(name, 0.0)) for name in feat_cols], dtype=np.float32)
-
-#     # 3) 构造动作目录（支持 meta.action_map / action_names / 数据推断）
-#     #    这里 dataset 只传最小必要结构；build_action_catalog 会自己兜底
-#     action_catalog = build_action_catalog(meta, {"actions": np.array([0])})
-
-#     # 4) 从在线系统（若存在）收集句柄，用于拿到 Q / 不确定性
-#     model_handles = {}
-#     try:
-#         from drive_tools import _online_system  # 自身模块可重入引用
-#         if _online_system:
-#             model_handles.update({
-#                 "q_ensemble": _online_system.get("q_ensemble"),
-#                 "uncertainty_sampler": _online_system.get("active_learner"),
-#                 "bcq_trainer": _online_system.get("trainer"),
-#                 "device": "cuda" if (hasattr(_online_system.get("trainer"), "device") and _online_system["trainer"].device == "cuda") else "cpu",
-#             })
-#     except Exception:
-#         pass
-
-#     # 5) 计算排序推荐
-#     rec = compute_recommendation(vec, model_handles, action_catalog, meta, topk=topk)
-
-#     # 6) 生产 Markdown 报告（更贴近“状态向量+推荐”）
-#     md = render_patient_report(
-#         patient={"id": patient_id},
-#         state=vec,
-#         rec=rec,
-#         meta=meta,
-#         action_catalog=action_catalog
-#     )
-
-#     # 7) 生成分析图（把 top-k 装配成 analysis 结构传给画图函数）
-#     analysis = {
-#         "all_options": {
-#             "action_values": [
-#                 {"action": action_catalog[aid], "q_value": score}
-#                 for (aid, _nm, score) in rec.get("ranked", [])
-#             ]
-#         },
-#         "recommendation": {
-#             "recommended_action": action_catalog.get(rec["ranked"][0][0], "Unknown") if rec.get("ranked") else "Unknown",
-#             "recommended_treatment": action_catalog.get(rec["ranked"][0][0], "Unknown") if rec.get("ranked") else "Unknown",
-#             "confidence": 1.0 - float(rec.get("uncertainty", 0.0)),
-#         },
-#         "predicted_trajectory": {"trajectory": []}  # 先留空，函数内部有兜底
-#     }
-#     img = make_treatment_analysis_figure(analysis)
-
-#     return md, img
 
