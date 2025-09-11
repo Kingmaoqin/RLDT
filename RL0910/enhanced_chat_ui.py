@@ -1268,14 +1268,28 @@ def create_gradio_interface():
             fig, axes = plt.subplots(2, 2, figsize=(10, 8))
             fig.suptitle('Treatment Analysis', fontsize=14)
 
-            # 1) Treatment comparison
-            ax = axes[0, 0]
             all_opts = (analysis.get('all_options') or {})
             avs = all_opts.get('action_values') or []
+            action_catalog = {av.get('action_id'): av.get('action') for av in avs}
+            rec = analysis.get('recommendation', {}) if isinstance(analysis, dict) else {}
+            act = rec.get('recommended_action')
+            rt = rec.get('recommended_treatment')
+            if isinstance(rt, str) and rt.isdigit():
+                rec_name = action_catalog.get(int(rt), f"Action {rt}")
+            elif rt:
+                rec_name = str(rt)
+            elif isinstance(act, (int, float)):
+                rec_name = action_catalog.get(int(act), f"Action {int(act)}")
+            elif isinstance(act, str):
+                rec_name = act
+            else:
+                rec_name = 'Unknown'
+            rec_idx = act
+
+            # 1) Treatment comparison
+            ax = axes[0, 0]
             if avs:
                 actions, q_values, colors = [], [], []
-                rec_idx = analysis.get('recommendation', {}).get('recommended_action', None)
-                rec_name = analysis.get('recommendation', {}).get('recommended_treatment', '')
                 for av in avs:
                     a = av.get('action', '')
                     q = av.get('q_value', 0.0)
@@ -1370,13 +1384,12 @@ def create_gradio_interface():
             # 4) Summary
             ax = axes[1, 1]
             ax.axis('off')
-            rec = analysis.get('recommendation', {}).get('recommended_treatment', 'Unknown')
             conf = analysis.get('recommendation', {}).get('confidence', 0.0)
             ts = analysis.get('analysis_timestamp', 'Unknown')
 
             summary_text = f"""Analysis Summary:
 
-        - Recommended: {rec}
+        - Recommended: {rec_name}
         - Confidence: {conf:.3f}
         - Analysis Time: {ts}
 
