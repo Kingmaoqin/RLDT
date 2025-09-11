@@ -831,7 +831,7 @@ def create_gradio_interface():
                 df = data_manager.get_current_data()
             except Exception:
                 df = None
-            meta = getattr(data_manager, "current_meta", {}) or {}
+            meta = data_manager.get_current_meta()
             id2name = (meta.get("action_map")
                     or {i: n for i, n in enumerate(meta.get("action_names") or [])})
 
@@ -942,7 +942,7 @@ def create_gradio_interface():
                         action_names = actions
                     else:
                         # id->name 的映射：如果 data_manager.current_meta 有 action_names / action_map，cohort 会按 ID 统计
-                        meta = getattr(getattr(__import__('data_manager'), 'data_manager'), 'current_meta', {}) or {}
+                        meta = getattr(__import__('data_manager'), 'data_manager').get_current_meta()
                         id2name = meta.get('action_map') or {i: n for i, n in enumerate(meta.get('action_names', []))}
                         action_names = [id2name.get(int(a), str(a)) for a in actions]
                 except Exception:
