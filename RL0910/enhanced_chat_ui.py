@@ -2302,7 +2302,7 @@ def create_gradio_interface():
         demo.load(
             generate_virtual_data,
             inputs=[n_patients_slider],
-            outputs=[current_source_text, stats_display, patient_dropdown]
+            outputs=[current_source_text, stats_display, action_legend, patient_dropdown]
         )
     
     return demo
