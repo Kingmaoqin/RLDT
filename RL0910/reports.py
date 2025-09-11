@@ -589,6 +589,10 @@ def render_patient_report_html(patient: Dict,
         else:
             explanation = (f"Model recommends <strong>{_html_escape(best_name)}</strong> "
                             f"with estimated score {best_score:.3f}.")
+        explanation += (
+            " Scores indicate the model’s estimated immediate benefit; "
+            "higher values suggest better expected short-term outcomes."
+        )
 
     if abnormal:
         vitals_comment = "Attention: " + ", ".join(map(_html_escape, abnormal)) + " outside normal range." 
@@ -641,7 +645,7 @@ def render_patient_report_html(patient: Dict,
         html_parts.extend([
             "<h2>Treatment Comparison</h2>",
             "<table>",
-            "  <thead><tr><th>Plan</th><th>Score</th></tr></thead>",
+            "  <thead><tr><th>Plan</th><th title='Scores indicate the model’s estimated immediate benefit; higher values suggest better expected short-term outcomes.'>Score</th></tr></thead>",
             "  <tbody>",
             f"    {comp_table}",
             "  </tbody>",
