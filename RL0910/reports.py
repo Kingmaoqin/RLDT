@@ -506,8 +506,10 @@ def render_patient_report_html(patient: Dict,
     pid = str(patient.get('patient_id', 'Unknown'))
     state = patient.get('current_state', {}) or {}
     rec  = (analysis or {}).get('recommendation', {}) or {}
-    all_opts = ((analysis or {}).get('all_options') or {}).get('action_values') or []
+    all_opts_dict = (analysis or {}).get('all_options') or {}
+    all_opts = all_opts_dict.get('action_values') or []
     traj = ((analysis or {}).get('predicted_trajectory') or {}).get('trajectory') or []
+    warning = (analysis or {}).get('all_options_error') or all_opts_dict.get('error')
 
     rec_name = str(rec.get('recommended_treatment', action_catalog.get(rec.get('recommended_action', -1), 'Unknown')))
     conf = rec.get('confidence', None)
@@ -543,9 +545,9 @@ def render_patient_report_html(patient: Dict,
         nm = _html_escape(action_catalog.get(int(act), act)) if isinstance(act, (int, float)) else _html_escape(str(act))
         qv = _score(it)
         comp_rows.append(f"<tr><td>{nm}</td><td>{qv:.3f}</td></tr>")
-    comp_table = "\n".join(comp_rows) if comp_rows else "<tr><td colspan='2'>No alternatives</td></tr>"
+    comp_table = "\n".join(comp_rows)
 
-    # 解释文本
+    explanation = ""
     if avs_sorted:
         best = avs_sorted[0]
         best_name = action_catalog.get(int(best.get('action', -1)), 'Unknown')
@@ -560,8 +562,6 @@ def render_patient_report_html(patient: Dict,
         else:
             explanation = (f"Model recommends <strong>{_html_escape(best_name)}</strong> "
                             f"with estimated score {best_score:.3f}.")
-    else:
-        explanation = "No action scores available for explanation."
 
     if abnormal:
         vitals_comment = "Attention: " + ", ".join(map(_html_escape, abnormal)) + " outside normal range." 
@@ -572,64 +572,61 @@ def render_patient_report_html(patient: Dict,
     from datetime import datetime
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # 组装 HTML（参考 P001_report.html 的风格）
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<title>Patient Treatment Report</title>
-<style>
-body {{ font-family: Arial, sans-serif; margin: 32px; }}
-h1, h2 {{ color: #2c3e50; }}
-.card {{ background:#f9fbfd; border:1px solid #e6ecf5; border-radius:10px; padding:16px; margin:12px 0; }}
-table {{ border-collapse: collapse; width: 100%; }}
-th, td {{ border:1px solid #ddd; padding:10px; text-align:left; }}
-th {{ background:#34495e; color:#fff; }}
-.badge {{ display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; }}
-.badge-normal {{ background:#2ecc71; color:#fff; }}
-.badge-alert {{ background:#e74c3c; color:#fff; }}
-</style>
-</head>
-<body>
-<h1>Digital Twin Treatment Recommendation Report</h1>
-<p><strong>Generated:</strong> {now}</p>
-
-<h2>Patient</h2>
-<div class="card">
-  <p><strong>ID:</strong> {pid}</p>
-</div>
-
-<h2>Current State (snapshot)</h2>
-<table>
-  <thead><tr><th>Metric</th><th>Value</th><th>Status</th></tr></thead>
-  <tbody>
-  {state_table}
-  </tbody>
-</table>
-
-<h2>Treatment Recommendation</h2>
-<div class="card">
-  <p><strong>Recommended Treatment:</strong> { _html_escape(rec_name) }</p>
-  <p><strong>Confidence:</strong> { (f"{conf:.3f}" if isinstance(conf,(int,float)) else "N/A") }</p>
-  <p><strong>Expected Immediate Outcome:</strong> { (f"{float(exp):+.3f}" if isinstance(exp,(int,float)) else "N/A") }</p>
-</div>
-
-<h2>Treatment Comparison</h2>
-<table>
-  <thead><tr><th>Plan</th><th>Score</th></tr></thead>
-  <tbody>
-    {comp_table}
-  </tbody>
-</table>
-
-<h2>Treatment Explanation</h2>
-<p class="card">{explanation}</p>
-
-<p>{vitals_comment}</p>
-
-<h2>Notes</h2>
-<p class="card">This report is generated from your uploaded schema & data. Action labels are dynamic and resolved from your dataset or YAML schema.</p>
-
-</body>
-</html>"""
-    return html
+    # Assemble HTML report
+    html_parts = [
+        "<!DOCTYPE html>",
+        "<html>",
+        "<head>",
+        "<meta charset=\"utf-8\"/>",
+        "<title>Patient Treatment Report</title>",
+        "<style>",
+        "body { font-family: Arial, sans-serif; margin: 32px; }",
+        "h1, h2 { color: #2c3e50; }",
+        ".card { background:#f9fbfd; border:1px solid #e6ecf5; border-radius:10px; padding:16px; margin:12px 0; }",
+        "table { border-collapse: collapse; width: 100%; }",
+        "th, td { border:1px solid #ddd; padding:10px; text-align:left; }",
+        "th { background:#34495e; color:#fff; }",
+        ".badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; }",
+        ".badge-normal { background:#2ecc71; color:#fff; }",
+        ".badge-alert { background:#e74c3c; color:#fff; }",
+        "</style>",
+        "</head>",
+        "<body>",
+        "<h1>Digital Twin Treatment Recommendation Report</h1>",
+        f"<p><strong>Generated:</strong> {now}</p>",
+        "<h2>Patient</h2>",
+        f"<div class='card'><p><strong>ID:</strong> {pid}</p></div>",
+        "<h2>Current State (snapshot)</h2>",
+        "<table>",
+        "  <thead><tr><th>Metric</th><th>Value</th><th>Status</th></tr></thead>",
+        "  <tbody>",
+        f"  {state_table}",
+        "  </tbody>",
+        "</table>",
+        "<h2>Treatment Recommendation</h2>",
+        f"<div class='card'><p><strong>Recommended Treatment:</strong> { _html_escape(rec_name) }</p>"
+        f"<p><strong>Confidence:</strong> { (f'{conf:.3f}' if isinstance(conf,(int,float)) else 'N/A') }</p>"
+        f"<p><strong>Expected Immediate Outcome:</strong> { (f'{float(exp):+.3f}' if isinstance(exp,(int,float)) else 'N/A') }</p></div>",
+    ]
+    if warning:
+        html_parts.append(f"<p style='color:#e74c3c;'><strong>Warning:</strong> {_html_escape(warning)}</p>")
+    if avs_sorted:
+        html_parts.extend([
+            "<h2>Treatment Comparison</h2>",
+            "<table>",
+            "  <thead><tr><th>Plan</th><th>Score</th></tr></thead>",
+            "  <tbody>",
+            f"    {comp_table}",
+            "  </tbody>",
+            "</table>",
+            "<h2>Treatment Explanation</h2>",
+            f"<p class='card'>{explanation}</p>",
+        ])
+    html_parts.extend([
+        f"<p>{vitals_comment}</p>",
+        "<h2>Notes</h2>",
+        "<p class='card'>This report is generated from your uploaded schema & data. Action labels are dynamic and resolved from your dataset or YAML schema.</p>",
+        "</body>",
+        "</html>",
+    ])
+    return "".join(html_parts)
