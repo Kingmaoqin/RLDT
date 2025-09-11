@@ -85,11 +85,33 @@ class DataManager:
             
             self.real_data_path = file_path
             print(f"Loaded real data from {file_path}: {len(self.real_data)} records")
-            
+
             # 确保有patient_id列
             if 'patient_id' not in self.real_data.columns:
                 self.real_data['patient_id'] = [f"R{i:04d}" for i in range(len(self.real_data))]
-            
+            feature_cols = [
+                c
+                for c in self.real_data.columns
+                if c.startswith("state_") and not c.startswith("next_state_")
+            ]
+            if not feature_cols:
+                drop_cols = {"patient_id", "timestep", "action", "reward", "terminal"}
+                numeric = self.real_data.select_dtypes(include=["int64", "float64", "float32", "int32"]).columns.tolist()
+                feature_cols = [c for c in numeric if c not in drop_cols]
+            unique_actions = (
+                sorted(self.real_data["action"].unique())
+                if "action" in self.real_data.columns
+                else []
+            )
+            action_names = [f"Action {a}" for a in unique_actions]
+            self.current_meta = {
+                "feature_columns": feature_cols,
+                "action_names": action_names if action_names else None,
+                "action_map": {
+                    a: name for a, name in zip(unique_actions, action_names)
+                } if unique_actions else None,
+            }
+
             return self.real_data
         except Exception as e:
             print(f"Error loading real data: {e}")
