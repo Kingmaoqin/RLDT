@@ -21,7 +21,18 @@ class DataManager:
         self.real_data = None
         self.current_source = "virtual"  # "virtual" or "real"
         self.real_data_path = None
-        
+        self.current_meta = {}
+        self.current_schema = {}
+
+    def get_current_meta(self) -> dict:
+        """Return metadata for the current dataset."""
+        return getattr(self, "current_meta", {}) or {}
+
+    def get_current_schema(self) -> dict:
+        """Return schema information for the current dataset."""
+        return getattr(self, "current_schema", {}) or {}
+
+
     def generate_virtual_data(self, n_patients: int = 1000, seed: int = 42) -> pd.DataFrame:
         """生成虚拟数据"""
         print(f"Generating virtual data for {n_patients} patients...")
@@ -34,9 +45,29 @@ class DataManager:
         # 添加患者ID
         patient_ids = []
         for pid in self.virtual_data['trajectory_id'].unique():
-            patient_ids.extend([f"P{pid:04d}"] * len(self.virtual_data[self.virtual_data['trajectory_id'] == pid]))
+            patient_ids.extend(
+                [f"P{pid:04d}"]
+                * len(self.virtual_data[self.virtual_data['trajectory_id'] == pid])
+            )
         self.virtual_data['patient_id'] = patient_ids
-        
+        feature_cols = [
+            c
+            for c in self.virtual_data.columns
+            if c.startswith("state_") and not c.startswith("next_state_")
+        ]
+        unique_actions = (
+            sorted(self.virtual_data['action'].unique())
+            if 'action' in self.virtual_data.columns
+            else []
+        )
+        action_names = [f"Action {a}" for a in unique_actions]
+        self.current_meta = {
+            "feature_columns": feature_cols,
+            "action_names": action_names if action_names else None,
+            "action_map": {
+                a: name for a, name in zip(unique_actions, action_names)
+            } if unique_actions else None,
+        }        
         print(f"Generated {len(self.virtual_data)} records for {n_patients} patients")
         return self.virtual_data
     
@@ -204,7 +235,28 @@ class DataManager:
             raise ValueError("Source must be 'virtual' or 'real'")
         self.current_source = source
         print(f"Data source set to: {source}")
-    
+        if source == "virtual":
+            if self.virtual_data is None:
+                self.generate_virtual_data()
+            if self.current_meta is None:
+                feature_cols = [
+                    c
+                    for c in self.virtual_data.columns
+                    if c.startswith("state_") and not c.startswith("next_state_")
+                ]
+                unique_actions = (
+                    sorted(self.virtual_data['action'].unique())
+                    if 'action' in self.virtual_data.columns
+                    else []
+                )
+                action_names = [f"Action {a}" for a in unique_actions]
+                self.current_meta = {
+                    "feature_columns": feature_cols,
+                    "action_names": action_names if action_names else None,
+                    "action_map": {
+                        a: name for a, name in zip(unique_actions, action_names)
+                    } if unique_actions else None,
+                }    
     def get_current_data(self) -> pd.DataFrame:
         """获取当前激活的数据"""
         if self.current_source == "virtual":
