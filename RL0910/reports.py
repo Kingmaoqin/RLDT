@@ -499,6 +499,7 @@ def _html_escape(s: str) -> str:
 def render_patient_report_html(patient: Dict,
                                analysis: Dict,
                                action_catalog: Dict[int, str],
+                               meta: Optional[Dict] = None,
                                cohort_stats: Optional[Dict] = None) -> str:
     """
     生成自然语言 HTML 报告（兼容任意数据列；动作名来自 action_catalog）
@@ -517,22 +518,28 @@ def render_patient_report_html(patient: Dict,
 
     # 状态表（仅展示若干关键项）
     keys = list(state.keys())[:12]
-    rows = []
-    abnormal = []
+    rows: List[str] = []
+    abnormal: List[str] = []
+    stats = (meta or {}).get('feature_stats') if isinstance(meta, dict) else {}
     for k in keys:
         v = state[k]
         status = "Normal"
         try:
             fv = float(v)
             vv = f"{fv:.3f}"
-            if fv < 0 or fv > 1:
+            info = stats.get(k) if isinstance(stats, dict) else None
+            lo = info.get('min') if isinstance(info, dict) else None
+            hi = info.get('max') if isinstance(info, dict) else None
+            if (lo is not None and fv < lo) or (hi is not None and fv > hi):
                 status = "Review"
                 abnormal.append(k)
         except Exception:
             vv = _html_escape(v)
             status = "N/A"
         badge_class = 'badge-normal' if status == 'Normal' else 'badge-alert'
-        rows.append(f"<tr><td>{_html_escape(k)}</td><td>{vv}</td><td><span class='badge {badge_class}'>{status}</span></td></tr>")
+        rows.append(
+            f"<tr><td>{_html_escape(k)}</td><td>{vv}</td><td><span class='badge {badge_class}'>{status}</span></td></tr>"
+        )
     state_table = "\n".join(rows) if rows else "<tr><td colspan='3'>No structured state</td></tr>"
 
     # 候选治疗排序

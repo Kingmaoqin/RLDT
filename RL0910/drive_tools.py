@@ -1716,11 +1716,12 @@ def generate_patient_report_ui(patient_id: str, topk: int = 3, fmt: str = "html"
             dataset_shim = {"actions": df["action"].values if (df is not None and "action" in df.columns) else None}
         except Exception:
             dataset_shim = {"actions": None}
-        action_catalog = build_action_catalog(data_manager.get_current_meta(), dataset_shim)
+        meta = data_manager.get_current_meta()
+        action_catalog = build_action_catalog(meta, dataset_shim)
 
         if fmt == "html":
             from reports import render_patient_report_html
-            html = render_patient_report_html(patient, analysis, action_catalog)
+            html = render_patient_report_html(patient, analysis, action_catalog, meta)
             # 保存 HTML
             import os
             from datetime import datetime
