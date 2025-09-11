@@ -1721,11 +1721,11 @@ def get_action_legend_html() -> str:
               "<td style='border:1px solid #ccc;padding:4px;'>{}</td></tr>"
     rows = "\n".join([row_tpl.format(int(k), str(v)) for k, v in sorted(id2name.items())])
     return f"""
-    <div style="background:#f9fbfd;color:#000;padding:12px;border:1px solid #e6ecf5;">
+    <div style="background:#f9fbfd;color:#ff0000;padding:12px;border:1px solid #e6ecf5;">
       <style>
         .action-legend-table tbody tr:nth-child(even) {{background-color:#eef3f9;}}
       </style>
-      <h4 style="margin-top:0;color:#34495e;">Action Legend</h4>
+      <h4 style="margin-top:0;color:#ff0000;">Action Legend</h4>
       <table class="action-legend-table" style="border-collapse:collapse;width:100%;">
         <thead>
           <tr>
