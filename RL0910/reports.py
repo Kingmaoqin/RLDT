@@ -234,6 +234,9 @@ def render_patient_report(patient: Dict,
     lines.append("- This report is generated from your uploaded schema & data; action labels are dynamic.")
     return "\n".join(lines)
 
+
+
+
 def _safe_float(x, default=0.0):
     try:
         v = float(x)
@@ -343,6 +346,89 @@ def render_patient_report_md(patient: Dict, analysis: Dict, cohort_stats: Option
     lines.append("> 说明：报告为模型推理与仿真所得，不替代临床判断。")
     return "\n".join(lines)
 
+def render_patient_report_html(patient: Dict,
+                               analysis: Dict,
+                               action_catalog: Dict[int, str],
+                               cohort_stats: Optional[Dict] = None) -> str:
+    """Render a patient report in simple HTML format.
+
+    The structure mirrors :func:`render_patient_report_md` but outputs HTML
+    segments for easy rendering in browsers or notebooks.
+    """
+    pid = str(patient.get("patient_id", "Unknown"))
+    state = patient.get("current_state", {}) or {}
+    rec = (analysis or {}).get("recommendation", {}) or {}
+    rec_name = str(rec.get("recommended_treatment", "Unknown"))
+    conf = _safe_float(rec.get("confidence", 0.0))
+    exp_out = _safe_float(rec.get("expected_immediate_outcome", 0.0))
+
+    lines: List[str] = []
+    lines.append(f"<h1>Patient Report (ID: {pid})</h1>")
+
+    # State snapshot
+    lines.append("<h2>State Snapshot</h2>")
+    if state:
+        lines.append("<ul>")
+        keys = list(state.keys())[: min(12, len(state))]
+        for k in keys:
+            v = state.get(k)
+            try:
+                if isinstance(v, float):
+                    lines.append(f"<li><strong>{k}</strong>: {v:.3f}</li>")
+                else:
+                    lines.append(f"<li><strong>{k}</strong>: {v}</li>")
+            except Exception:
+                lines.append(f"<li><strong>{k}</strong>: {v}</li>")
+        lines.append("</ul>")
+    else:
+        lines.append("<p>No structured state information.</p>")
+
+    # Recommendation summary
+    lines.append("<h2>Recommendations</h2>")
+    lines.append(f"<p><strong>Recommended:</strong> {rec_name}</p>")
+    lines.append(f"<p><strong>Confidence:</strong> {conf:.3f}</p>")
+    lines.append(f"<p><strong>Expected immediate outcome:</strong> {exp_out:.3f}</p>")
+
+    # Action ranking
+    all_opts = (analysis or {}).get("all_options", {}) or {}
+    avs = all_opts.get("action_values") or []
+
+    def _score(av: Dict) -> float:
+        return _safe_float(av.get("q_value", av.get("expected_outcome", 0.0)))
+
+    if avs:
+        lines.append("<h3>Action Ranking</h3>")
+        lines.append("<ol>")
+        avs_sorted = sorted(avs, key=_score, reverse=True)[:5]
+        for av in avs_sorted:
+            act = av.get("action")
+            name = None
+            if isinstance(act, (int, float)):
+                name = action_catalog.get(int(act), f"Action {int(act)}")
+            else:
+                try:
+                    aid = int(act)
+                    name = action_catalog.get(aid, str(act))
+                except Exception:
+                    name = str(act)
+            score = _score(av)
+            lines.append(f"<li>{name} (score {score:.3f})</li>")
+        lines.append("</ol>")
+
+    # Optional cohort statistics
+    if isinstance(cohort_stats, dict) and cohort_stats:
+        lines.append("<h2>Cohort Statistics</h2>")
+        tp = int(cohort_stats.get("total_patients", 0))
+        tr = int(cohort_stats.get("total_records", 0))
+        lines.append("<ul>")
+        lines.append(f"<li>Total patients: {tp}</li>")
+        lines.append(f"<li>Total records: {tr}</li>")
+        lines.append("</ul>")
+
+    lines.append("<p><em>Report is generated from model inference and simulation; it does not replace clinical judgement.</em></p>")
+    return "\n".join(lines)
+
+
 def make_treatment_analysis_figure(analysis: Dict) -> Image.Image:
     """
     生成稳健的治疗分析图（PIL Image），包括动作评分柱状图 + 7步轨迹预览。
@@ -413,90 +499,105 @@ def make_treatment_analysis_figure(analysis: Dict) -> Image.Image:
     plt.close(fig)
     return Image.open(buf)
 
+def _html_escape(s: str) -> str:
+    import html
+    return html.escape(str(s), quote=True)
 
-# def render_patient_report_md(patient: Dict, analysis: Dict, cohort_stats: Optional[Dict] = None) -> str:
-#     pid = str(patient.get('patient_id', 'Unknown'))
-#     state = patient.get('current_state', {})
-#     rec = (analysis or {}).get('recommendation', {}) or {}
-#     rec_name = str(rec.get('recommended_treatment', 'Unknown'))
-#     conf = _safe_float(rec.get('confidence', 0.0))
-#     exp_out = _safe_float(rec.get('expected_immediate_outcome', 0.0))
+def render_patient_report_html(patient: Dict,
+                               analysis: Dict,
+                               action_catalog: Dict[int, str],
+                               cohort_stats: Optional[Dict] = None) -> str:
+    """
+    生成自然语言 HTML 报告（兼容任意数据列；动作名来自 action_catalog）
+    """
+    pid = str(patient.get('patient_id', 'Unknown'))
+    state = patient.get('current_state', {}) or {}
+    rec  = (analysis or {}).get('recommendation', {}) or {}
+    all_opts = ((analysis or {}).get('all_options') or {}).get('action_values') or []
+    traj = ((analysis or {}).get('predicted_trajectory') or {}).get('trajectory') or []
 
-#     lines = [f"# 患者报告（ID: {pid}）", "", "## 当前状态（部分）"]
-#     for k in list(state.keys())[:12]:
-#         v = state[k]
-#         try:
-#             lines.append(f"- **{k}**：{float(v):.3f}")
-#         except Exception:
-#             lines.append(f"- **{k}**：{v}")
+    rec_name = str(rec.get('recommended_treatment', action_catalog.get(rec.get('recommended_action', -1), 'Unknown')))
+    conf = rec.get('confidence', None)
+    exp  = rec.get('expected_immediate_outcome', None)
 
-#     lines += ["", "## 治疗建议",
-#               f"- **推荐**：{rec_name}",
-#               f"- **置信度**：{conf:.3f}",
-#               f"- **期望即时收益/结局**：{exp_out:.3f}"]
+    # 状态表（仅展示若干关键项）
+    keys = list(state.keys())[:12]
+    rows = []
+    for k in keys:
+        v = state[k]
+        try:
+            vv = f"{float(v):.3f}"
+        except Exception:
+            vv = _html_escape(v)
+        rows.append(f"<tr><td>{_html_escape(k)}</td><td>{vv}</td></tr>")
+    state_table = "\n".join(rows) if rows else "<tr><td colspan='2'>No structured state</td></tr>"
 
-#     avs = ((analysis or {}).get('all_options') or {}).get('action_values') or []
-#     if avs:
-#         lines += ["", "### 候选方案（按分数降序）"]
-#         def _score(av): return _safe_float(av.get('q_value', av.get('expected_outcome', 0.0)))
-#         for i, av in enumerate(sorted(avs, key=_score, reverse=True)[:5], 1):
-#             nm = str(av.get('action', f'Option-{i}'))
-#             sc = _score(av)
-#             lines.append(f"{i}. {nm}（评分 {sc:.3f}）")
+    # 候选治疗排序
+    def _score(d):
+        return float(d.get('q_value', d.get('expected_outcome', 0.0)) or 0.0)
+    avs_sorted = sorted(all_opts, key=_score, reverse=True)[:5]
+    comp_rows = []
+    for it in avs_sorted:
+        nm = _html_escape(str(it.get('action', 'Option')))
+        qv = _score(it)
+        comp_rows.append(f"<tr><td>{nm}</td><td>{qv:.3f}</td></tr>")
+    comp_table = "\n".join(comp_rows) if comp_rows else "<tr><td colspan='2'>No alternatives</td></tr>"
 
-#     abn = (analysis or {}).get('abnormal_features') or []
-#     if abn:
-#         lines += ["", "## 关键影响因素"]
-#         for it in abn[:10]:
-#             lines.append(f"- {it.get('feature')}：{it.get('status','')}（{_safe_float(it.get('value'),0.0):.3f}）")
+    # 生成时间戳
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-#     cf = (analysis or {}).get('counterfactuals') or {}
-#     if cf:
-#         lines += ["", "## 反事实评估（长期）"]
-#         for k, v in cf.items():
-#             mean = _safe_float(v.get('mean_outcome', 0.0))
-#             lo, hi = v.get('confidence_interval', [mean, mean])
-#             lines.append(f"- {k}：{mean:.3f}（95%CI {_safe_float(lo,mean):.3f} ~ {_safe_float(hi,mean):.3f}）")
+    # 组装 HTML（参考 P001_report.html 的风格）
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Patient Treatment Report</title>
+<style>
+body {{ font-family: Arial, sans-serif; margin: 32px; }}
+h1, h2 {{ color: #2c3e50; }}
+.card {{ background:#f9fbfd; border:1px solid #e6ecf5; border-radius:10px; padding:16px; margin:12px 0; }}
+table {{ border-collapse: collapse; width: 100%; }}
+th, td {{ border:1px solid #ddd; padding:10px; text-align:left; }}
+th {{ background:#34495e; color:#fff; }}
+.badge {{ display:inline-block; padding:2px 8px; border-radius:999px; background:#eef2f7; color:#333; font-size:12px; }}
+</style>
+</head>
+<body>
+<h1>Digital Twin Treatment Recommendation Report</h1>
+<p><strong>Generated:</strong> {now}</p>
 
-#     lines += ["", "> 说明：报告为模型推理与仿真所得，不替代临床判断。"]
-#     return "\n".join(lines)
+<h2>Patient</h2>
+<div class="card">
+  <p><strong>ID:</strong> {pid}</p>
+</div>
 
-# def make_treatment_analysis_figure(analysis: Dict) -> Image.Image:
-#     fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-#     # 左：动作评分
-#     ax = axes[0]
-#     avs = ((analysis or {}).get('all_options') or {}).get('action_values') or []
-#     rec_action = (analysis or {}).get('recommendation', {}).get('recommended_action', '')
-#     if avs:
-#         acts = [str(av.get('action','A?')) for av in avs]
-#         vals = [_safe_float(av.get('q_value', av.get('expected_outcome', 0.0))) for av in avs]
-#         cols = ['tomato' if a == rec_action else 'steelblue' for a in acts]
-#         ax.bar(range(len(acts)), vals, color=cols, alpha=0.85)
-#         ax.set_xticks(range(len(acts))); ax.set_xticklabels(acts, rotation=30, ha='right')
-#         ax.set_title('Treatment Options'); ax.set_ylabel('Score')
-#     else:
-#         ax.axis('off'); ax.text(0.5,0.5,'No action values',ha='center',va='center')
+<h2>Current State (snapshot)</h2>
+<table>
+  <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+  <tbody>
+  {state_table}
+  </tbody>
+</table>
 
-#     # 右：7步轨迹
-#     ax = axes[1]
-#     traj = (((analysis or {}).get('predicted_trajectory') or {}).get('trajectory') or [])[:7]
-#     if traj:
-#         steps = list(range(len(traj)))
-#         def pick(st, key, last): 
-#             v = _safe_float(st.get(key,last), last); return v
-#         g, o = [], []; last_g, last_o = 0.5, 0.95
-#         for t in traj:
-#             st = t.get('state', {})
-#             gv = pick(st,'glucose', last_g); ov = pick(st,'oxygen_saturation', last_o)
-#             g.append(gv); o.append(ov); last_g, last_o = gv, ov
-#         ax2 = ax.twinx()
-#         l1 = ax.plot(steps, g, marker='o', label='Glucose')
-#         l2 = ax2.plot(steps, o, marker='s', linestyle='--', label='O2 Sat')
-#         ax.set_xlabel('Step'); ax.set_ylabel('Glucose'); ax2.set_ylabel('O2 Sat'); ax.set_title('7-step Projection')
-#         lines = l1 + l2; labels = [l.get_label() for l in lines]; ax.legend(lines, labels, loc='best'); ax.grid(alpha=0.3)
-#     else:
-#         ax.axis('off'); ax.text(0.5,0.5,'No trajectory',ha='center',va='center')
+<h2>Treatment Recommendation</h2>
+<div class="card">
+  <p><strong>Recommended Treatment:</strong> { _html_escape(rec_name) }</p>
+  <p><strong>Confidence:</strong> { (f"{conf:.3f}" if isinstance(conf,(int,float)) else "N/A") }</p>
+  <p><strong>Expected Immediate Outcome:</strong> { (f"{float(exp):+.3f}" if isinstance(exp,(int,float)) else "N/A") }</p>
+</div>
 
-#     import io
-#     buf = io.BytesIO(); plt.tight_layout(); plt.savefig(buf, format='png', dpi=140, bbox_inches='tight'); buf.seek(0); plt.close(fig)
-#     return Image.open(buf)
+<h2>Treatment Comparison</h2>
+<table>
+  <thead><tr><th>Plan</th><th>Score</th></tr></thead>
+  <tbody>
+    {comp_table}
+  </tbody>
+</table>
+
+<h2>Notes</h2>
+<p class="card">This report is generated from your uploaded schema & data. Action labels are dynamic and resolved from your dataset or YAML schema.</p>
+
+</body>
+</html>"""
+    return html
