@@ -254,12 +254,19 @@ def render_patient_report_html(patient: Dict,
     pid = str(patient.get("patient_id") or patient.get("id") or "Unknown")
     state = patient.get("current_state", {}) or {}
     rec = (analysis or {}).get("recommendation", {}) or {}
-    rec_name = str(
-        rec.get("recommended_treatment")
-        or action_catalog.get(rec.get("recommended_action"), "Unknown")
-    )
-    conf = _safe_float(rec.get("confidence", 0.0))
-    exp_out = _safe_float(rec.get("expected_immediate_outcome", 0.0))
+    act = rec.get("recommended_action")
+    if rec.get("recommended_treatment"):
+        rec_name = str(rec["recommended_treatment"])
+    elif isinstance(act, (int, float)):
+        rec_name = action_catalog.get(int(act), f"Action {int(act)}")
+    elif isinstance(act, str):
+        rec_name = act
+    else:
+        rec_name = "Unknown"
+    conf_val = rec.get("confidence")
+    conf = f"{_safe_float(conf_val):.3f}" if conf_val is not None else "N/A"
+    exp_val = rec.get("expected_immediate_outcome")
+    exp_out = f"{_safe_float(exp_val):.3f}" if exp_val is not None else "N/A"
 
     # Top-K comparison if present
     all_opts = (analysis or {}).get("all_options", {}) or {}
@@ -302,8 +309,8 @@ def render_patient_report_html(patient: Dict,
     html.append("<div class='section recommendation'>")
     html.append("<h2>Treatment Recommendation</h2>")
     html.append(f"<p><strong>Recommended:</strong> {rec_name}</p>")
-    html.append(f"<p><strong>Confidence:</strong> {conf:.3f}</p>")
-    html.append(f"<p><strong>Expected Immediate Outcome:</strong> {exp_out:.3f}</p>")
+    html.append(f"<p><strong>Confidence:</strong> {conf}</p>")
+    html.append(f"<p><strong>Expected Immediate Outcome:</strong> {exp_out}</p>")
     html.append("</div>")
 
     # Option ranking
