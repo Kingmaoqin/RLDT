@@ -768,9 +768,15 @@ def get_all_action_values(patient_state: dict) -> dict:
 
         _response_monitor.record_inference_time(inference_time)
 
+        action_dim = getattr(_inference_engine, "action_dim", len(result["treatment_rankings"]))
+        inference_names = getattr(_inference_engine, "action_names", None)
+        names = inference_names if isinstance(inference_names, list) and inference_names else [
+            f"Action {i}" for i in range(action_dim)
+        ]
+
         action_values = []
         for action_idx, q_value in result["treatment_rankings"]:
-            action_name = _inference_engine.action_names[action_idx]
+            action_name = names[action_idx] if action_idx < len(names) else f"Action {action_idx}"
             action_values.append({
                 "action": action_name,
                 "action_id": int(action_idx),
@@ -816,13 +822,13 @@ def get_all_action_values(patient_state: dict) -> dict:
                 )
             if not isinstance(scores, np.ndarray):
                 scores = np.array(scores, dtype=np.float32)
+            inference_names = getattr(_inference_engine, "action_names", None)
+            names = inference_names if isinstance(inference_names, list) and inference_names else [
+                f"Action {i}" for i in range(action_dim)
+            ]
             action_values = []
             for action_idx, q_value in enumerate(scores):
-                action_name = (
-                    _inference_engine.action_names[action_idx]
-                    if _inference_engine and action_idx < len(_inference_engine.action_names)
-                    else f"Action {action_idx}"
-                )
+                action_name = names[action_idx] if action_idx < len(names) else f"Action {action_idx}"
                 action_values.append({
                     "action": action_name,
                     "action_id": int(action_idx),
