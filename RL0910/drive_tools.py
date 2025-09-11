@@ -770,8 +770,11 @@ def get_all_action_values(patient_state: dict) -> dict:
         
         action_values = []
         for i, (action_idx, q_value) in enumerate(result['treatment_rankings']):
+            action_name = _inference_engine.action_names[action_idx]
             action_values.append({
-                "action": _inference_engine.action_names[action_idx],
+                "action": action_name,
+                "action_id": int(action_idx),
+                "action_name": action_name,
                 "q_value": float(q_value)
             })
         
