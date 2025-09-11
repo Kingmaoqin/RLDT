@@ -1274,7 +1274,8 @@ def create_gradio_interface():
             avs = all_opts.get('action_values') or []
             if avs:
                 actions, q_values, colors = [], [], []
-                rec_action = analysis.get('recommendation', {}).get('recommended_action', '')
+                rec_idx = analysis.get('recommendation', {}).get('recommended_action', None)
+                rec_name = analysis.get('recommendation', {}).get('recommended_treatment', '')
                 for av in avs:
                     a = av.get('action', '')
                     q = av.get('q_value', 0.0)
@@ -1286,7 +1287,11 @@ def create_gradio_interface():
                         q = 0.0
                     actions.append(str(a))
                     q_values.append(q)
-                    colors.append('red' if a == rec_action else 'blue')
+                    if ((rec_idx is not None and av.get('action_id') == rec_idx) or
+                            (rec_name and a == rec_name)):
+                        colors.append('red')
+                    else:
+                        colors.append('blue')
 
                 ax.bar(range(len(actions)), q_values, color=colors, alpha=0.7)
                 ax.set_xticks(range(len(actions)))
@@ -1295,8 +1300,9 @@ def create_gradio_interface():
                 ax.set_ylabel('Q-Value')
                 ax.set_title('Treatment Options Comparison')
 
-                if rec_action:
-                    ax.text(0.02, 0.98, f"Recommended: {rec_action}",
+                if rec_name or rec_idx is not None:
+                    label = rec_name if rec_name else str(rec_idx)
+                    ax.text(0.02, 0.98, f"Recommended: {label}",
                             transform=ax.transAxes, va='top',
                             bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.5))
             else:
@@ -1364,7 +1370,7 @@ def create_gradio_interface():
             # 4) Summary
             ax = axes[1, 1]
             ax.axis('off')
-            rec = analysis.get('recommendation', {}).get('recommended_action', 'Unknown')
+            rec = analysis.get('recommendation', {}).get('recommended_treatment', 'Unknown')
             conf = analysis.get('recommendation', {}).get('confidence', 0.0)
             ts = analysis.get('analysis_timestamp', 'Unknown')
 

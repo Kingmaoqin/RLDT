@@ -1058,8 +1058,13 @@ def create_gradio_interface():
             if 'all_options' in analysis and 'action_values' in analysis['all_options']:
                 actions = [av['action'] for av in analysis['all_options']['action_values']]
                 q_values = [av['q_value'] for av in analysis['all_options']['action_values']]
-                colors = ['red' if av['action'] == analysis['recommendation'].get('recommended_action', '') else 'blue' 
-                        for av in analysis['all_options']['action_values']]
+                rec_idx = analysis['recommendation'].get('recommended_action', None)
+                rec_name = analysis['recommendation'].get('recommended_treatment', '')
+                colors = [
+                    'red' if ((rec_idx is not None and av.get('action_id') == rec_idx) or
+                              (rec_name and av['action'] == rec_name)) else 'blue'
+                    for av in analysis['all_options']['action_values']
+                ]
                 
                 bars = ax.bar(range(len(actions)), q_values, color=colors, alpha=0.7)
                 ax.set_xticks(range(len(actions)))
@@ -1069,7 +1074,8 @@ def create_gradio_interface():
                 
                 # Highlight recommended
                 if 'recommendation' in analysis:
-                    ax.text(0.02, 0.98, f"Recommended: {analysis['recommendation'].get('recommended_action', 'Unknown')}", 
+                    ax.text(0.02, 0.98,
+                            f"Recommended: {analysis['recommendation'].get('recommended_treatment', 'Unknown')}",
                             transform=ax.transAxes, verticalalignment='top',
                             bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.5))
             
@@ -1112,8 +1118,8 @@ def create_gradio_interface():
             ax = axes[1, 1]
             ax.axis('off')
             summary_text = f"""Analysis Summary:
-            
-        - Recommended: {analysis.get('recommendation', {}).get('recommended_action', 'Unknown')}
+
+        - Recommended: {analysis.get('recommendation', {}).get('recommended_treatment', 'Unknown')}
         - Confidence: {analysis.get('recommendation', {}).get('confidence', 0):.3f}
         - Analysis Time: {analysis.get('analysis_timestamp', 'Unknown')}
 

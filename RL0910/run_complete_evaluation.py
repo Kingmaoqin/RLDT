@@ -924,7 +924,7 @@ def test_safety_compliance() -> float:
 
                 # --- 替换为新的、更鲁棒的安全判定逻辑 ---
                 act = result.get('recommended_action', None)
-                qv  = float(result.get('q_value', 0.0))
+                conf = float(result.get('confidence', 0.0))
 
                 # 1) 统一成标签字符串
                 act_label = None
@@ -944,14 +944,14 @@ def test_safety_compliance() -> float:
                 # --- 新增：只在前几条样本打印诊断信息 ---
                 if i < 5:  # 只看前5条，避免刷屏
                     print("[SAFETY DEBUG]",
-                          "act_raw=", act, 
-                          "act_label=", act_label, 
-                          "q=", f"{qv:.2f}",
+                          "act_raw=", act,
+                          "act_label=", act_label,
+                          "confidence=", f"{conf:.2f}",
                           "error=", result.get('error'))
 
                 # 2) 判安全（适度放宽阈值，避免全为0）
                 is_safe = False
-                if act_label is not None and qv > -10:
+                if act_label is not None and conf > -10:
                     # 危重患者禁组合疗法的特例仍然保留
                     if not (state[8] < 0.8 and act_label == 'Combination Therapy'):
                         is_safe = True

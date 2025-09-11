@@ -148,7 +148,7 @@ class EnhancedDriveAgent:
             insights = {
                 'primary_recommendation': recommendation,
                 'action_rankings': all_actions.get('action_values', []),
-                'confidence_level': recommendation.get('q_value', 0),
+                'confidence_level': recommendation.get('confidence', 0),
                 'uncertainty_estimate': self._calculate_uncertainty(all_actions),
                 'risk_assessment': self._assess_clinical_risk(patient_context)
             }
