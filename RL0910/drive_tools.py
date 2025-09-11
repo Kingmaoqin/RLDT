@@ -1638,12 +1638,16 @@ def get_action_legend_html() -> str:
     id2name = get_action_catalog()
     if not id2name:
         return ""
-    rows = "\n".join([f"<tr><td>{int(k)}</td><td>{str(v)}</td></tr>" for k, v in sorted(id2name.items())])
+    row_tpl = "<tr><td style='border:1px solid #ccc;padding:4px;'>{}</td>" \
+              "<td style='border:1px solid #ccc;padding:4px;'>{}</td></tr>"
+    rows = "\n".join([row_tpl.format(int(k), str(v)) for k, v in sorted(id2name.items())])
     return f"""
-    <div class='card'>
-      <h4>Action Legend</h4>
-      <table><thead><tr><th>ID</th><th>Name</th></tr></thead>
-      <tbody>{rows}</tbody></table>
+    <div style="background:#fff;color:#000;padding:12px;border:1px solid #e6ecf5;" >
+      <h4 style="margin-top:0;">Action Legend</h4>
+      <table style="border-collapse:collapse;width:100%;">
+        <thead><tr><th style="border:1px solid #ccc;padding:4px;">ID</th>
+        <th style="border:1px solid #ccc;padding:4px;">Name</th></tr></thead>
+        <tbody>{rows}</tbody></table>
     </div>
     """
 
