@@ -758,30 +758,54 @@ def get_all_action_values(patient_state: dict) -> dict:
     try:
         if _inference_engine is None:
             return {"error": "Tools not initialized"}
-        
+
         inference_start = time.time()
         state_array = _validate_patient_state(patient_state)
         result = _inference_engine.recommend_treatment(state_array, return_all_scores=True)
+        if not result or "treatment_rankings" not in result:
+            raise ValueError("Missing treatment rankings")
         inference_time = time.time() - inference_start
-        
+
         _response_monitor.record_inference_time(inference_time)
-        
+
         action_values = []
-        for i, (action_idx, q_value) in enumerate(result['treatment_rankings']):
+        for action_idx, q_value in result["treatment_rankings"]:
             action_name = _inference_engine.action_names[action_idx]
             action_values.append({
                 "action": action_name,
                 "action_id": int(action_idx),
                 "action_name": action_name,
-                "q_value": float(q_value)
+                "q_value": float(q_value),
             })
-        
+
         return {
             "action_values": action_values,
-            "inference_time_ms": inference_time * 1000
+            "inference_time_ms": inference_time * 1000,
         }
     except Exception as e:
-        return {"error": str(e)}
+        try:
+            state_array = _validate_patient_state(patient_state)
+            action_dim = getattr(_inference_engine, "action_dim", 0) if _inference_engine else 0
+            scores = _scores_from_policy_only(
+                state_array, MODEL_HANDLES, action_dim
+            ) if _scores_from_policy_only else np.zeros(action_dim, dtype=np.float32)
+
+            action_values = []
+            for action_idx, q_value in enumerate(scores):
+                action_name = (
+                    _inference_engine.action_names[action_idx]
+                    if _inference_engine and action_idx < len(_inference_engine.action_names)
+                    else f"Action {action_idx}"
+                )
+                action_values.append({
+                    "action": action_name,
+                    "action_id": int(action_idx),
+                    "action_name": action_name,
+                    "q_value": float(q_value),
+                })
+            return {"action_values": action_values, "warning": str(e)}
+        except Exception as inner:
+            return {"error": f"{e}; fallback failed: {inner}"}
 
 def get_response_time_stats() -> Dict:
     """获取响应时间统计"""
