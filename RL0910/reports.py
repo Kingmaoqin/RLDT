@@ -431,17 +431,22 @@ def make_treatment_analysis_figure(analysis: Dict) -> Image.Image:
     ax = axes[0]
     all_opts = (analysis or {}).get('all_options') or {}
     avs = all_opts.get('action_values') or []
-    rec_action = (analysis or {}).get('recommendation', {}).get('recommended_action', '')
+    rec_action = (analysis or {}).get('recommendation', {}).get('recommended_action', None)
+    rec_name = (analysis or {}).get('recommendation', {}).get('recommended_treatment', '')
     if avs:
         acts = []
         vals = []
         cols = []
         for av in avs:
             a = str(av.get('action', 'A?'))
+            a_id = av.get('action_id', None)
             q = _safe_float(av.get('q_value', av.get('expected_outcome', 0.0)))
             acts.append(a)
             vals.append(q)
-            cols.append('tomato' if a == rec_action else 'steelblue')
+            if (rec_action is not None and a_id == rec_action) or (rec_name and a == rec_name):
+                cols.append('tomato')
+            else:
+                cols.append('steelblue')
         ax.bar(range(len(acts)), vals, color=cols, alpha=0.85)
         ax.set_xticks(range(len(acts)))
         ax.set_xticklabels(acts, rotation=30, ha='right')

@@ -648,6 +648,7 @@ def get_optimal_recommendation_bcq(patient_state: dict) -> dict:
 
         chosen_idx = None
         q_value = None
+        all_q_values = None
         source = 'Unknown'
 
         # 3. 优先用 BCQ 策略预测动作
@@ -659,8 +660,10 @@ def get_optimal_recommendation_bcq(patient_state: dict) -> dict:
                 # 尝试从BCQ获取动作值
                 try:
                     q_all = bcq_trainer.bcq_algo.predict_value(obs_batch)  # -> (1, n_actions)
-                    if isinstance(q_all, np.ndarray) and q_all.ndim == 2 and q_all.shape[1] > chosen_idx:
-                        q_value = float(q_all[0, chosen_idx])
+                    if isinstance(q_all, np.ndarray) and q_all.ndim == 2:
+                        all_q_values = q_all[0]
+                        if all_q_values.shape[0] > chosen_idx:
+                            q_value = float(all_q_values[chosen_idx])
                 except Exception:
                     pass  # 获取Q值失败是可接受的，继续执行
             except Exception as e:
@@ -669,7 +672,7 @@ def get_optimal_recommendation_bcq(patient_state: dict) -> dict:
                 source = 'Unknown'
 
         # 4. Fallback：用 ConservativeQNetwork 评估 Q 值，argmax 出动作
-        if (chosen_idx is None) or (q_value is None):
+        if (chosen_idx is None) or (q_value is None) or (all_q_values is None):
             try:
                 qnet = getattr(_inference_engine, 'q_network', None)
                 device = getattr(_inference_engine, 'device', 'cpu')
@@ -686,12 +689,13 @@ def get_optimal_recommendation_bcq(patient_state: dict) -> dict:
 
                     if qs is None: # 方式二: qnet(s, a_onehot) -> q
                         vals = []
-                        for a in range(act_dim): # <-- 使用修正后的 act_dim
-                            a_one = F.one_hot(torch.tensor([a], device=device), num_classes=act_dim).float() # <-- 使用修正后的 act_dim
+                        for a in range(act_dim):
+                            a_one = F.one_hot(torch.tensor([a], device=device), num_classes=act_dim).float()
                             q = qnet(s, a_one)
                             vals.append(float(q.item()))
                         qs = np.asarray(vals, dtype=np.float32)
 
+                all_q_values = qs
                 new_chosen_idx = int(np.argmax(qs))
                 new_q_value = float(qs[new_chosen_idx])
 
@@ -711,38 +715,32 @@ def get_optimal_recommendation_bcq(patient_state: dict) -> dict:
         if q_value is None:
             q_value = 0.0
 
-        # 6. 映射动作标签（防止越界）并返回
+        if all_q_values is None:
+            all_q_values = np.zeros(len(labels), dtype=np.float32)
+
+        # 6. 映射动作标签（防止越界）
         if not (0 <= chosen_idx < len(labels)):
             chosen_idx = min(max(chosen_idx, 0), len(labels) - 1)
-        
-        recommended_action = labels[chosen_idx]
-        
+
+        recommended_action = int(chosen_idx)
+        recommended_treatment = labels[recommended_action]
+
+        q_mean = float(np.mean(all_q_values))
+        confidence = float(q_value - q_mean)
+
+        try:
+            device = getattr(_inference_engine, 'device', 'cpu')
+            state_tensor = torch.from_numpy(obs).float().to(device).unsqueeze(0)
+            action_tensor = torch.tensor([recommended_action], device=device)
+            exp_outcome = float(_inference_engine.outcome_model(state_tensor, action_tensor).item())
+        except Exception:
+            exp_outcome = 0.0
+
         return {
             "recommended_action": recommended_action,
-            "q_value": q_value,
-            "source": source
-        }
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}
-        # 5. 最后的兜底，不再使用占位符
-        if chosen_idx is None:
-            chosen_idx = 0  # 兜底动作：0 (通常是 'No Treatment')
-            source = 'Default'
-        if q_value is None:
-            q_value = 0.0   # 兜底 Q 值
-
-        # 6. 映射动作标签（防止越界）并返回
-        if not (0 <= chosen_idx < len(label_map)):
-            chosen_idx = min(max(chosen_idx, 0), len(label_map) - 1)
-        
-        recommended_action = label_map[chosen_idx]
-        
-        return {
-            "recommended_action": recommended_action,
-            "q_value": q_value,
+            "recommended_treatment": recommended_treatment,
+            "confidence": confidence,
+            "expected_immediate_outcome": exp_outcome,
             "source": source
         }
 
@@ -1371,10 +1369,15 @@ def analyze_patient(patient_id: str) -> dict:
                 fallback_warning = f"{fallback_warning}; fallback failed: {e_fallback}"
         
         # Simulate short-term trajectory
-        if recommendation.get("recommended_action"):
+        if recommendation.get("recommended_action") is not None:
+            act = recommendation["recommended_action"]
+            if isinstance(act, (int, np.integer)):
+                act_label = ACTION_CATALOG.get(act, str(act))
+            else:
+                act_label = str(act)
             trajectory = simulate_future_trajectory(
                 patient_state,
-                [recommendation["recommended_action"]] * 7,
+                [act_label] * 7,
                 7
             )
         else:
