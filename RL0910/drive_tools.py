@@ -37,15 +37,21 @@ except ImportError:
     BCQ_AVAILABLE = False
 
 try:
-    from reports import build_action_catalog, compute_recommendation, render_patient_report
+    from reports import (
+        build_action_catalog,
+        compute_recommendation,
+        render_patient_report,
+        _scores_from_policy_only,
+    )
 except Exception:
-    build_action_catalog = compute_recommendation = render_patient_report = None
+    build_action_catalog = compute_recommendation = render_patient_report = _scores_from_policy_only = None
 
 from reports import (
     build_action_catalog,
     compute_recommendation,
     render_patient_report,
     make_treatment_analysis_figure,
+    _scores_from_policy_only,
 )
 
 class BCQInferenceAdapter:
@@ -1335,6 +1341,31 @@ def analyze_patient(patient_id: str) -> dict:
         
         # Get all action values
         action_values = get_all_action_values(patient_state)
+        fallback_warning = None
+        if action_values.get("error"):
+            fallback_warning = action_values.get("error")
+            try:
+                state_vec = _state_to_vec(
+                    patient_state,
+                    state_dim=getattr(_inference_engine, "state_dim", 10),
+                )
+                action_dim = getattr(
+                    _inference_engine, "action_dim", len(ACTION_CATALOG) or 2
+                )
+                scores = _scores_from_policy_only(state_vec, MODEL_HANDLES, action_dim)
+                ranked_idx = list(np.argsort(-scores))
+                action_values = {
+                    "action_values": [
+                        {
+                            "action": ACTION_CATALOG.get(i, f"Action {i}"),
+                            "q_value": float(scores[i]),
+                        }
+                        for i in ranked_idx
+                    ]
+                }
+            except Exception as e_fallback:
+                action_values = {"action_values": []}
+                fallback_warning = f"{fallback_warning}; fallback failed: {e_fallback}"
         
         # Simulate short-term trajectory
         if recommendation.get("recommended_action"):
@@ -1353,9 +1384,11 @@ def analyze_patient(patient_id: str) -> dict:
             "recommendation": recommendation,
             "all_options": action_values,
             "predicted_trajectory": trajectory,
-            "analysis_timestamp": datetime.now().isoformat()
+            "analysis_timestamp": datetime.now().isoformat(),
         }
-        
+        if fallback_warning:
+            analysis["all_options_error"] = fallback_warning
+
         return analysis
     except Exception as e:
         return {"error": str(e)}
