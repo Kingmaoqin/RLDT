@@ -255,8 +255,11 @@ def render_patient_report_html(patient: Dict,
     state = patient.get("current_state", {}) or {}
     rec = (analysis or {}).get("recommendation", {}) or {}
     act = rec.get("recommended_action")
-    if rec.get("recommended_treatment"):
-        rec_name = str(rec["recommended_treatment"])
+    rt = rec.get("recommended_treatment")
+    if isinstance(rt, str) and rt.isdigit():
+        rec_name = action_catalog.get(int(rt), f"Action {rt}")
+    elif rt:
+        rec_name = str(rt)
     elif isinstance(act, (int, float)):
         rec_name = action_catalog.get(int(act), f"Action {int(act)}")
     elif isinstance(act, str):
@@ -332,13 +335,23 @@ def render_patient_report_md(patient: Dict, analysis: Dict, cohort_stats: Option
     pid = str(patient.get('patient_id', 'Unknown'))
     state = patient.get('current_state', {})
     rec = (analysis or {}).get('recommendation', {}) or {}
-    rec_name = str(rec.get('recommended_treatment', 'Unknown'))
-    conf = _safe_float(rec.get('confidence', 0.0))
-    exp_out = _safe_float(rec.get('expected_immediate_outcome', 0.0))
-
-    # Top-K 对比（若有）
     all_opts = (analysis or {}).get('all_options', {}) or {}
     avs = all_opts.get('action_values') or []
+    action_catalog = {av.get('action_id'): av.get('action') for av in avs}
+    act = rec.get('recommended_action')
+    rt = rec.get('recommended_treatment')
+    if isinstance(rt, str) and rt.isdigit():
+        rec_name = action_catalog.get(int(rt), f"Action {rt}")
+    elif rt:
+        rec_name = str(rt)
+    elif isinstance(act, (int, float)):
+        rec_name = action_catalog.get(int(act), f"Action {int(act)}")
+    elif isinstance(act, str):
+        rec_name = act
+    else:
+        rec_name = 'Unknown'
+    conf = _safe_float(rec.get('confidence', 0.0))
+    exp_out = _safe_float(rec.get('expected_immediate_outcome', 0.0))
     # 排序（按 q 或 outcome）
     def _score(av):
         return _safe_float(av.get('q_value', av.get('expected_outcome', 0.0)))
@@ -438,8 +451,21 @@ def make_treatment_analysis_figure(analysis: Dict) -> Image.Image:
     ax = axes[0]
     all_opts = (analysis or {}).get('all_options') or {}
     avs = all_opts.get('action_values') or []
-    rec_action = (analysis or {}).get('recommendation', {}).get('recommended_action', None)
-    rec_name = (analysis or {}).get('recommendation', {}).get('recommended_treatment', '')
+    action_catalog = {av.get('action_id'): av.get('action') for av in avs}
+    rec = (analysis or {}).get('recommendation', {}) or {}
+    act = rec.get('recommended_action')
+    rt = rec.get('recommended_treatment')
+    if isinstance(rt, str) and rt.isdigit():
+        rec_name = action_catalog.get(int(rt), f"Action {rt}")
+    elif rt:
+        rec_name = str(rt)
+    elif isinstance(act, (int, float)):
+        rec_name = action_catalog.get(int(act), f"Action {int(act)}")
+    elif isinstance(act, str):
+        rec_name = act
+    else:
+        rec_name = 'Unknown'
+    rec_action = act
     if avs:
         acts = []
         vals = []
@@ -524,7 +550,18 @@ def render_patient_report_html(patient: Dict,
     traj = ((analysis or {}).get('predicted_trajectory') or {}).get('trajectory') or []
     warning = (analysis or {}).get('all_options_error') or all_opts_dict.get('error')
 
-    rec_name = str(rec.get('recommended_treatment', action_catalog.get(rec.get('recommended_action', -1), 'Unknown')))
+    act = rec.get("recommended_action")
+    rt  = rec.get("recommended_treatment")
+    if isinstance(rt, str) and rt.isdigit():
+        rec_name = action_catalog.get(int(rt), f"Action {rt}")
+    elif rt:
+        rec_name = str(rt)
+    elif isinstance(act, (int, float)):
+        rec_name = action_catalog.get(int(act), f"Action {int(act)}")
+    elif isinstance(act, str):
+        rec_name = act
+    else:
+        rec_name = "Unknown"
     conf = rec.get('confidence', None)
     exp  = rec.get('expected_immediate_outcome', None)
 

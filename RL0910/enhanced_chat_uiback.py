@@ -1052,32 +1052,47 @@ def create_gradio_interface():
             
             fig, axes = plt.subplots(2, 2, figsize=(10, 8))
             fig.suptitle('Treatment Analysis', fontsize=14)
-            
+
+            all_opts = analysis.get('all_options', {}) if isinstance(analysis, dict) else {}
+            avs = all_opts.get('action_values') or []
+            action_catalog = {av.get('action_id'): av.get('action') for av in avs}
+            rec = analysis.get('recommendation', {}) if isinstance(analysis, dict) else {}
+            act = rec.get('recommended_action')
+            rt = rec.get('recommended_treatment')
+            if isinstance(rt, str) and rt.isdigit():
+                rec_name = action_catalog.get(int(rt), f"Action {rt}")
+            elif rt:
+                rec_name = str(rt)
+            elif isinstance(act, (int, float)):
+                rec_name = action_catalog.get(int(act), f"Action {int(act)}")
+            elif isinstance(act, str):
+                rec_name = act
+            else:
+                rec_name = "Unknown"
+            rec_idx = act
+
             # 1. Treatment comparison
             ax = axes[0, 0]
-            if 'all_options' in analysis and 'action_values' in analysis['all_options']:
-                actions = [av['action'] for av in analysis['all_options']['action_values']]
-                q_values = [av['q_value'] for av in analysis['all_options']['action_values']]
-                rec_idx = analysis['recommendation'].get('recommended_action', None)
-                rec_name = analysis['recommendation'].get('recommended_treatment', '')
+            if avs:
+                actions = [av.get('action') for av in avs]
+                q_values = [av.get('q_value') for av in avs]
                 colors = [
                     'red' if ((rec_idx is not None and av.get('action_id') == rec_idx) or
-                              (rec_name and av['action'] == rec_name)) else 'blue'
-                    for av in analysis['all_options']['action_values']
+                              (rec_name and av.get('action') == rec_name)) else 'blue'
+                    for av in avs
                 ]
-                
+
                 bars = ax.bar(range(len(actions)), q_values, color=colors, alpha=0.7)
                 ax.set_xticks(range(len(actions)))
                 ax.set_xticklabels([a.replace('Medication', 'Med') for a in actions], rotation=45, ha='right')
                 ax.set_ylabel('Q-Value')
                 ax.set_title('Treatment Options Comparison')
-                
+
                 # Highlight recommended
-                if 'recommendation' in analysis:
-                    ax.text(0.02, 0.98,
-                            f"Recommended: {analysis['recommendation'].get('recommended_treatment', 'Unknown')}",
-                            transform=ax.transAxes, verticalalignment='top',
-                            bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.5))
+                ax.text(0.02, 0.98,
+                        f"Recommended: {rec_name}",
+                        transform=ax.transAxes, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.5))
             
             # 2. Predicted trajectory preview
             ax = axes[0, 1]
@@ -1119,7 +1134,7 @@ def create_gradio_interface():
             ax.axis('off')
             summary_text = f"""Analysis Summary:
 
-        - Recommended: {analysis.get('recommendation', {}).get('recommended_treatment', 'Unknown')}
+        - Recommended: {rec_name}
         - Confidence: {analysis.get('recommendation', {}).get('confidence', 0):.3f}
         - Analysis Time: {analysis.get('analysis_timestamp', 'Unknown')}
 
