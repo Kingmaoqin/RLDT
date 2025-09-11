@@ -785,11 +785,37 @@ def get_all_action_values(patient_state: dict) -> dict:
     except Exception as e:
         try:
             state_array = _validate_patient_state(patient_state)
-            action_dim = getattr(_inference_engine, "action_dim", 0) if _inference_engine else 0
-            scores = _scores_from_policy_only(
-                state_array, MODEL_HANDLES, action_dim
-            ) if _scores_from_policy_only else np.zeros(action_dim, dtype=np.float32)
-
+            action_dim = getattr(_inference_engine, "action_dim", None)
+            if not action_dim:
+                action_dim = len(ACTION_CATALOG)
+            q_net = getattr(_inference_engine, "q_network", None)
+            scores = None
+            if q_net is not None:
+                device = getattr(_inference_engine, "device", None)
+                state_tensor = torch.tensor(state_array, dtype=torch.float32)
+                if device:
+                    state_tensor = state_tensor.to(device)
+                with torch.no_grad():
+                    try:
+                        qs = q_net(state_tensor).squeeze().detach().cpu().numpy()
+                        if qs.shape[-1] != action_dim:
+                            raise ValueError("action dim mismatch")
+                    except Exception:
+                        qs_list = []
+                        for a in range(action_dim):
+                            action_tensor = torch.tensor([a], device=state_tensor.device)
+                            q_val = q_net(state_tensor, action_tensor).item()
+                            qs_list.append(q_val)
+                        qs = np.array(qs_list, dtype=np.float32)
+                scores = qs
+            if scores is None:
+                scores = (
+                    _scores_from_policy_only(state_array, MODEL_HANDLES, action_dim)
+                    if _scores_from_policy_only
+                    else np.zeros(action_dim, dtype=np.float32)
+                )
+            if not isinstance(scores, np.ndarray):
+                scores = np.array(scores, dtype=np.float32)
             action_values = []
             for action_idx, q_value in enumerate(scores):
                 action_name = (
