@@ -72,18 +72,24 @@ class DigitalTwinInference:
         # Action names for interpretability
         self.action_names = [
             'Medication A',
-            'Medication B', 
+            'Medication B',
             'Medication C',
             'Placebo',
             'Combination Therapy'
         ]
-        
+
         # Feature names
         self.feature_names = [
             'Age', 'Gender', 'Blood Pressure', 'Heart Rate',
             'Glucose Level', 'Creatinine', 'Hemoglobin',
             'Temperature', 'Oxygen Saturation', 'BMI'
         ][:state_dim]
+
+        # Optional metadata defaults
+        self.critical_rules = []
+        self.spo2_idx = None
+        self.spo2_threshold = 0.80
+        self.norm = {"method": "none"}
         self.meta = {}
 
         # Set model_dir to a default value or allow it to be passed as an argument
@@ -93,14 +99,14 @@ class DigitalTwinInference:
             import json
             with open(meta_path, "r") as f:
                 self.meta = json.load(f)
-        self.critical_rules = self.meta.get("critical_features", [])        
-        self.feature_names = self.meta.get("feature_names", None)
-        self.action_names  = self.meta.get("action_names", None)
-        self.spo2_idx      = self.meta.get("spo2_idx", None)
-        self.spo2_threshold= float(self.meta.get("spo2_threshold", 0.80))
+        self.critical_rules = self.meta.get("critical_features", self.critical_rules)
+        self.feature_names = self.meta.get("feature_names", self.feature_names)
+        self.action_names  = self.meta.get("action_names", self.action_names)
+        self.spo2_idx      = self.meta.get("spo2_idx", self.spo2_idx)
+        self.spo2_threshold= float(self.meta.get("spo2_threshold", self.spo2_threshold))
 
         # 反归一化/归一化（如需）
-        self.norm = self.meta.get("norm", {"method":"none"})        
+        self.norm = self.meta.get("norm", self.norm)
             
     def recommend_treatment(self, 
                           patient_state: np.ndarray,
