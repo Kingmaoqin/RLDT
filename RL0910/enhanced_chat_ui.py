@@ -14,6 +14,7 @@ import json
 import argparse
 import sys
 import os
+import uuid
 from datetime import datetime
 from langchain_core.messages import HumanMessage
 from pandas_compat import get_pandas
@@ -112,7 +113,57 @@ CUSTOM_CSS = """
     backdrop-filter: blur(6px);
     margin-bottom: 18px;
 }
+.help-target button {
+    position: relative;
+}
+.help-target button::after {
+    content: " ❓";
+    font-size: 0.9em;
+    color: #4338ca;
+}
+.help-target button.has-help::before {
+    content: attr(data-help);
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(30, 41, 59, 0.95);
+    color: white;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    width: max-content;
+    max-width: 260px;
+    white-space: pre-wrap;
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.35);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease-in-out;
+    z-index: 99;
+}
+.help-target button.has-help::after {
+    transition: color 0.15s ease-in-out;
+}
+.help-target button.has-help:hover::before {
+    opacity: 1;
+}
+.help-target button.has-help:hover::after {
+    color: #1d4ed8;
+}
 """
+
+BUTTON_TOOLTIPS: dict[str, str] = {}
+
+
+def _register_button_with_help(label: str, tooltip: str, **kwargs):
+    """Create a button and remember its tooltip for later injection."""
+    elem_classes = list(kwargs.pop("elem_classes", []))
+    elem_classes.append("help-target")
+    elem_id = kwargs.pop("elem_id", f"btn-{uuid.uuid4().hex[:8]}")
+    button = gr.Button(label, elem_id=elem_id, elem_classes=elem_classes, **kwargs)
+    # Escape tooltip so it can be safely injected into JS/HTML attributes later.
+    BUTTON_TOOLTIPS[elem_id] = tooltip
+    return button
 
 DATA_STAGE_DEFAULT = (
     "### 🧭 Workflow Guide\n"
@@ -454,11 +505,11 @@ def retrain_with_params(preset, alpha, gamma, lr, reg_weight, batch_size, n_epoc
 
 def create_gradio_interface():
     """Create the full Gradio interface with chat, parameter control, and online learning monitor"""
-    
+
     # Initialize models
     print("Preparing inference models... (online training stays paused until started from the UI)")
     inference_engine, cds = load_models_and_initialize()
-    
+
     print("Initializing evaluation system...")
     evaluation_pipeline = create_online_evaluation_pipeline(
         models={
@@ -467,8 +518,9 @@ def create_gradio_interface():
             'q_network': inference_engine.q_network
         },
         test_data={'states': [], 'actions': []}  # 初始为空，实际使用时会更新
-    )    
+    )
     data_stage_message = None
+    BUTTON_TOOLTIPS.clear()
 
     with gr.Blocks(
         title="Real-time Interactive Clinical Navigator",
@@ -522,14 +574,22 @@ def create_gradio_interface():
                                     step=10,
                                     label="Number of Patients"
                                 )
-                                generate_btn = gr.Button("Generate Virtual Data", variant="primary")
+                                generate_btn = _register_button_with_help(
+                                    "Generate Virtual Data",
+                                    "Create a synthetic cohort so you can explore the full workflow without uploading files.",
+                                    variant="primary",
+                                )
 
                         # Real data options
                         with gr.Column(visible=False) as real_data_options:
                             with gr.Row():
                                 file_upload = gr.File(label="Upload Data File", file_types=[".csv", ".parquet", ".xlsx", ".xls"])
                                 schema_upload = gr.File(label="Upload Schema YAML (optional but recommended)", file_types=[".yaml", ".yml"])
-                                load_real_btn = gr.Button("Load Real Data", variant="primary")
+                                load_real_btn = _register_button_with_help(
+                                    "Load Real Data",
+                                    "Load the uploaded dataset (and optional schema) into the system and unlock the explorer.",
+                                    variant="primary",
+                                )
 
 
 
@@ -558,7 +618,12 @@ def create_gradio_interface():
                                 )
 
                             with gr.Row():
-                                quick_train_btn = gr.Button("🚀 Train Quick Baseline", variant="primary", visible=False)
+                                quick_train_btn = _register_button_with_help(
+                                    "🚀 Train Quick Baseline",
+                                    "Run a short calibration pass so the models match the currently loaded cohort.",
+                                    variant="primary",
+                                    visible=False,
+                                )
                                 training_status = gr.Markdown(visible=False)
 
                         with gr.Column(visible=False, elem_classes=["section-card"]) as patient_section:
@@ -570,11 +635,18 @@ def create_gradio_interface():
                                     value=None,
                                     interactive=False
                                 )
-                                refresh_patients_btn = gr.Button("🔄 Refresh List")
+                                refresh_patients_btn = _register_button_with_help(
+                                    "🔄 Refresh List",
+                                    "Rebuild the patient selector from the active dataset in case new records were loaded.",
+                                )
 
                             with gr.Row():
                                 patient_info_display = gr.Plot(label="Patient Information")
-                                generate_report_btn = gr.Button("🧾 Generate Patient Report", variant="primary")
+                                generate_report_btn = _register_button_with_help(
+                                    "🧾 Generate Patient Report",
+                                    "Produce a clinical summary for the selected patient including recommended actions.",
+                                    variant="primary",
+                                )
                                 patient_report_html = gr.HTML(visible=True)
                                 patient_analysis_display = gr.Image(label="Treatment Analysis", visible=False)
                                 report_download = gr.File(label="Report (HTML)", visible=False)
@@ -591,8 +663,16 @@ def create_gradio_interface():
 
 
                         with gr.Row():
-                            analyze_btn = gr.Button("Analyze Patient", variant="secondary", visible=False)
-                            export_btn = gr.Button("Export Patient Data")
+                            analyze_btn = _register_button_with_help(
+                                "Analyze Patient",
+                                "Run an in-depth feature and risk breakdown for the selected patient.",
+                                variant="secondary",
+                                visible=False,
+                            )
+                            export_btn = _register_button_with_help(
+                                "Export Patient Data",
+                                "Download the raw trajectory for offline review or manual labeling.",
+                            )
 
                         export_output = gr.File(label="Exported Data", visible=False)
 
@@ -607,7 +687,11 @@ def create_gradio_interface():
                                 label="Parameter Preset",
                                 info="Select a preset or choose Custom to adjust manually"
                             )
-                            recommend_btn = gr.Button("📊 Get Recommendations", scale=2)
+                            recommend_btn = _register_button_with_help(
+                                "📊 Get Recommendations",
+                                "Ask the assistant to suggest hyperparameters based on recent performance.",
+                                scale=2,
+                            )
 
                         with gr.Column(visible=False) as custom_params:
                             gr.Markdown("### Custom Parameters")
@@ -663,7 +747,11 @@ def create_gradio_interface():
 
                         with gr.Row():
                             confirm_apply = gr.Checkbox(label="I confirm these parameter changes", value=False)
-                            apply_btn = gr.Button("✅ Apply Configuration", variant="primary")
+                        apply_btn = _register_button_with_help(
+                            "✅ Apply Configuration",
+                            "Push the selected hyperparameters into the live system (requires confirmation checkbox).",
+                            variant="primary",
+                        )
 
                         apply_output = gr.Textbox(label="Configuration Status", lines=3)
 
@@ -680,7 +768,11 @@ def create_gradio_interface():
 
                         with gr.Row():
                             confirm_retrain = gr.Checkbox(label="I want to trigger online adaptation (5-10 min)", value=False)
-                            retrain_btn = gr.Button("🔄 Start Online Adaptation", variant="primary")
+                        retrain_btn = _register_button_with_help(
+                            "🔄 Start Online Adaptation",
+                            "Trigger a brief online finetuning job using the latest labeled data buffer.",
+                            variant="primary",
+                        )
 
                         retrain_output = gr.Markdown()
                     # Tab 3: Online Learning Monitor
@@ -692,10 +784,24 @@ def create_gradio_interface():
 
                         # 按钮行
                         with gr.Row():
-                            refresh_stats_btn = gr.Button("🔄 Refresh Stats", variant="primary")
-                            pause_btn = gr.Button("⏸️ Pause Training")
-                            resume_btn = gr.Button("▶️ Start Online Training")
-                            evaluate_btn = gr.Button("📊 Run Evaluation", variant="secondary") # 添加这个
+                            refresh_stats_btn = _register_button_with_help(
+                                "🔄 Refresh Stats",
+                                "Pull the latest counts from the online trainer without starting the stream.",
+                                variant="primary",
+                            )
+                            pause_btn = _register_button_with_help(
+                                "⏸️ Pause Training",
+                                "Stop ingesting new transitions while keeping the trainer ready to resume.",
+                            )
+                            resume_btn = _register_button_with_help(
+                                "▶️ Start Online Training",
+                                "Launch or resume the synthetic data stream so the online learner can update.",
+                            )
+                            evaluate_btn = _register_button_with_help(
+                                "📊 Run Evaluation",
+                                "Execute the default compliance evaluation against the latest model snapshot.",
+                                variant="secondary",
+                            )  # 添加这个
 
                         # 统计数据显示和 Active Learning Statistics JSON 显示在同一行，分成两列
                         with gr.Row():
@@ -732,7 +838,11 @@ def create_gradio_interface():
                                 value="Standard Evaluation",
                                 label="Evaluation Scenario",
                             )
-                            start_eval_btn = gr.Button("🚀 Start Custom Evaluation", variant="primary")
+                            start_eval_btn = _register_button_with_help(
+                                "🚀 Start Custom Evaluation",
+                                "Run an evaluation with the selected duration and scenario to check compliance.",
+                                variant="primary",
+                            )
 
                         gr.Markdown("### 👨‍⚕️ Expert Feedback Mode")
                         gr.Markdown("""
@@ -787,19 +897,22 @@ def create_gradio_interface():
                                     interactive=False,
                                 )
 
-                                submit_expert_label_btn = gr.Button(
+                                submit_expert_label_btn = _register_button_with_help(
                                     "✅ Submit Expert Label",
+                                    "Commit your reward assessment so the transition moves into the labeled buffer.",
                                     variant="primary",
                                     interactive=False,
                                 )
 
-                                skip_case_btn = gr.Button(
+                                skip_case_btn = _register_button_with_help(
                                     "⏭️ Skip Case",
+                                    "Skip this transition without labeling it (it stays in the queue).",
                                     variant="secondary",
                                     interactive=False,
                                 )
-                                refresh_case_btn = gr.Button(
+                                refresh_case_btn = _register_button_with_help(
                                     "🔄 Get Next Case",
+                                    "Fetch the next uncertain transition from the active learning queue.",
                                     variant="secondary",
                                 )
 
@@ -819,7 +932,10 @@ def create_gradio_interface():
                                 label="Uncertainty Threshold (τ)",
                                 info="Lower = query more samples, Higher = query fewer samples",
                             )
-                            update_tau_btn = gr.Button("Update Threshold")
+                            update_tau_btn = _register_button_with_help(
+                                "Update Threshold",
+                                "Apply the new uncertainty threshold so the active learner queries more or fewer cases.",
+                            )
 
                         tau_update_output = gr.Textbox(label="Update Status", lines=2)
 
@@ -837,7 +953,11 @@ def create_gradio_interface():
 
                         # 下载报告按钮
                         with gr.Row():
-                            download_report_btn = gr.Button("📥 Download Report", visible=False)
+                            download_report_btn = _register_button_with_help(
+                                "📥 Download Report",
+                                "Save the most recent evaluation summary as a markdown report.",
+                                visible=False,
+                            )
                             report_file = gr.File(label="Downloaded Report", visible=False)
 
                         # 如何工作说明
@@ -910,8 +1030,15 @@ def create_gradio_interface():
                     lines=2
                 )
                 with gr.Row():
-                    submit = gr.Button("Send", variant="primary")
-                    clear = gr.Button("Clear")
+                    submit = _register_button_with_help(
+                        "Send",
+                        "Send the typed prompt to the co-pilot assistant.",
+                        variant="primary",
+                    )
+                    clear = _register_button_with_help(
+                        "Clear",
+                        "Remove the current chat history so you can start a new conversation.",
+                    )
 
                 gr.Examples(
                     examples=[
@@ -942,6 +1069,23 @@ def create_gradio_interface():
             import io
             from PIL import Image
             from data_manager import data_manager
+
+            # 提前处理空数据的情况，渲染占位图
+            if not stats or (isinstance(stats, dict) and stats.get("total_records", 0) == 0 and not stats.get("action_counts")):
+                fig = plt.figure(figsize=(8, 5))
+                fig.suptitle("Dataset Overview", fontsize=16)
+                ax = fig.add_subplot(111)
+                ax.axis("off")
+                message = (
+                    stats.get("error") if isinstance(stats, dict) and stats.get("error")
+                    else "No dataset is loaded yet. Generate virtual data or load a file to populate these panels."
+                )
+                ax.text(0.5, 0.5, message, ha="center", va="center", fontsize=12, wrap=True)
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+                buf.seek(0)
+                plt.close(fig)
+                return Image.open(buf)
 
             # 拿到当前数据与 meta
             try:
@@ -1042,9 +1186,18 @@ def create_gradio_interface():
 
         def create_stats_visualization(stats):
             """Create visualization for dataset statistics"""
-            if not stats or "error" in stats:
-                return None
-            
+            if not stats or (isinstance(stats, dict) and stats.get("error")):
+                fig, ax = plt.subplots(figsize=(8, 5))
+                fig.suptitle('Dataset Overview', fontsize=16)
+                ax.axis('off')
+                message = (
+                    stats.get('error') if isinstance(stats, dict) and stats.get('error')
+                    else 'Dataset statistics are unavailable. Load data to view cohort insights.'
+                )
+                ax.text(0.5, 0.5, message, ha='center', va='center', fontsize=12, wrap=True)
+                plt.tight_layout()
+                return fig
+
             fig, axes = plt.subplots(2, 2, figsize=(12, 8))
             fig.suptitle('Dataset Overview', fontsize=16)
             
@@ -1804,8 +1957,11 @@ def create_gradio_interface():
 
         def create_stats_visualization(stats_dict):
 
-            if not stats_dict or "error" in stats_dict:
-                return None, []
+            stats_dict = stats_dict or {}
+            error_message = None
+            if isinstance(stats_dict, dict) and stats_dict.get('error'):
+                error_message = stats_dict.get('error')
+                stats_dict = {}
 
             # 兼容嵌套结构
             al = stats_dict.get('active_learning', {}) if isinstance(stats_dict, dict) else {}
@@ -1878,6 +2034,19 @@ def create_gradio_interface():
 
             plt.suptitle('Active Learning Statistics Dashboard', fontsize=14, fontweight='bold')
 
+            if error_message:
+                fig.text(0.5, 0.05, error_message, ha='center', va='center', fontsize=10, color='#dc2626')
+            elif total_seen == 0:
+                fig.text(
+                    0.5,
+                    0.05,
+                    'No online training activity yet. Start the trainer and click “Refresh Stats”.',
+                    ha='center',
+                    va='center',
+                    fontsize=10,
+                    color='#1e3a8a'
+                )
+
             table_data = [
                 ["Total Transitions", f"{total_seen:,}"],
                 ["Query Rate", f"{query_rate:.2f}%"],
@@ -1898,21 +2067,30 @@ def create_gradio_interface():
             from drive_tools import get_online_stats
             stats = get_online_stats()
             
-            if "error" in stats:
+            if isinstance(stats, dict) and stats.get('error'):
                 gr.Warning(f"Error getting stats: {stats['error']}")
-                return 0, 0, 0, 0, 0.05, 0, gr.update(visible=False), []  # hide plot when error
-            
-            # Extract key metrics
-            total_trans = stats.get('total_transitions', 0)
-            query_rate = stats.get('active_learning', {}).get('query_rate', 0) * 100
-            buffer_size = stats.get('labeled_buffer_size', 0)
-            avg_uncertainty = stats.get('active_learning', {}).get('avg_queried_uncertainty', 0)
-            current_tau = stats.get('current_hyperparams', {}).get('tau', 0.05)
-            updates = stats.get('total_updates', 0)
-            
+
+            # Extract key metrics with safe defaults
+            total_trans = stats.get('total_transitions', 0) if isinstance(stats, dict) else 0
+            query_rate = (
+                stats.get('active_learning', {}).get('query_rate', 0) * 100
+                if isinstance(stats, dict) else 0
+            )
+            buffer_size = stats.get('labeled_buffer_size', 0) if isinstance(stats, dict) else 0
+            avg_uncertainty = (
+                stats.get('active_learning', {}).get('avg_queried_uncertainty', 0)
+                if isinstance(stats, dict) else 0
+            )
+            current_tau = (
+                stats.get('current_hyperparams', {}).get('tau', 0.05)
+                if isinstance(stats, dict) else 0.05
+            )
+            updates = stats.get('total_updates', 0) if isinstance(stats, dict) else 0
+
             # 创建可视化
             fig, table_data = create_stats_visualization(stats)
-            
+            plot_update = gr.update(value=fig, visible=True) if fig is not None else gr.update(visible=False)
+
             return (
                 total_trans,
                 round(query_rate, 2),
@@ -1920,8 +2098,8 @@ def create_gradio_interface():
                 round(avg_uncertainty, 4),
                 current_tau,
                 updates,
-                fig,  # 返回图表而不是JSON
-                table_data  # 返回表格数据
+                plot_update,
+                table_data
             )
         
         def pause_online_training():
@@ -2606,7 +2784,35 @@ def create_gradio_interface():
                 
             except Exception as e:
                 return 0, 0, 0, "Error", 0, f"Error: {str(e)}"
-            
+
+        tooltip_payload = json.dumps(BUTTON_TOOLTIPS, ensure_ascii=False).replace("</", "<\\/")
+        gr.HTML(
+            f"""
+            <script>
+            (function() {{
+                const tooltips = {tooltip_payload};
+                function applyTooltips() {{
+                    Object.entries(tooltips).forEach(([containerId, message]) => {{
+                        const container = document.getElementById(containerId);
+                        if (!container) {{ return; }}
+                        const button = container.querySelector('button');
+                        if (!button) {{ return; }}
+                        button.classList.add('has-help');
+                        if (!button.dataset.help || button.dataset.help !== message) {{
+                            button.setAttribute('data-help', message);
+                        }}
+                    }});
+                }}
+                document.addEventListener('DOMContentLoaded', applyTooltips);
+                document.addEventListener('gradio:ready', applyTooltips);
+                document.addEventListener('gradio:component', applyTooltips);
+                setInterval(applyTooltips, 2000);
+                applyTooltips();
+            }})();
+            </script>
+            """
+        )
+
     return demo
 
 
