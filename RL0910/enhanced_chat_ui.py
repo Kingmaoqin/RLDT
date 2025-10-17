@@ -1681,8 +1681,8 @@ def create_gradio_interface():
             if "error" in result:
                 gr.Warning(f"Error: {result['error']}")
             else:
-                gr.Info("Online training paused")
-        
+                gr.Info(result.get("message", "Online training paused"))
+
         def resume_online_training():
             """Resume online training"""
             from drive_tools import resume_online_training
@@ -1690,7 +1690,7 @@ def create_gradio_interface():
             if "error" in result:
                 gr.Warning(f"Error: {result['error']}")
             else:
-                gr.Info("Online training resumed")
+                gr.Info(result.get("message", "Online training started"))
         
         def update_tau_threshold(new_tau):
             """Update active learning threshold"""
