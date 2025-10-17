@@ -571,15 +571,12 @@ def create_gradio_interface():
                     # Tab 3: Online Learning Monitor
                     with gr.Tab("📊 Online Learning Monitor"):
                         gr.Markdown("### Real-time Training Statistics")
-                        gr.Markdown(
-                            "> ℹ️ The online trainer stays paused after launch. Press **Start Online Training** when you are ready to stream new data."
-                        )
 
                         # 按钮行
                         with gr.Row():
                             refresh_stats_btn = gr.Button("🔄 Refresh Stats", variant="primary")
                             pause_btn = gr.Button("⏸️ Pause Training")
-                            resume_btn = gr.Button("▶️ Start Online Training")
+                            resume_btn = gr.Button("▶️ Resume Training")
                             evaluate_btn = gr.Button("📊 Run Evaluation", variant="secondary") # 添加这个
 
                         # 统计数据显示和 Active Learning Statistics JSON 显示在同一行，分成两列
