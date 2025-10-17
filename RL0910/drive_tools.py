@@ -1599,6 +1599,17 @@ def quick_train_on_current_data(max_epochs: int = 5,
 
     duration = time.time() - start_time
 
+    try:
+        data_manager.register_training_run({
+            "type": "quick_baseline",
+            "samples": int(len(df_sorted)),
+            "state_dim": int(state_dim),
+            "action_dim": int(action_dim),
+            "duration_sec": float(duration),
+        })
+    except Exception as err:
+        print(f"[WARN] Failed to record training history: {err}")
+
     return {
         "status": "success",
         "message": "Quick baseline training completed.",
@@ -1956,12 +1967,16 @@ def get_action_catalog() -> dict:
     raw_map = meta.get("action_map") or {
         i: n for i, n in enumerate(meta.get("action_names") or [])
     }
-    id2name: Dict[int, str] = {}
+    id2name: Dict[Any, str] = {}
     for k, v in (raw_map or {}).items():
         name = str(v).strip()
         if not name:
-            name = f"Action {int(k)}"
-        id2name[int(k)] = name
+            name = f"Action {k}"
+        try:
+            key = int(k)
+        except Exception:
+            key = str(k)
+        id2name[key] = name
     # 如仍为空，从当前数据集推断 id 集合
     try:
         df = data_manager.get_current_data()
@@ -1971,7 +1986,7 @@ def get_action_catalog() -> dict:
                 id2name.setdefault(int(i), f"Action {int(i)}")
     except Exception:
         pass
-    return {int(k): str(v) for k, v in (id2name or {}).items()}
+    return {k: str(v) for k, v in (id2name or {}).items()}
 
 def get_action_legend_html() -> str:
     """把动作映射渲染成 HTML 表格，供 UI 显示。"""
@@ -1980,7 +1995,15 @@ def get_action_legend_html() -> str:
         return ""
     row_tpl = "<tr><td style='border:1px solid #ccc;padding:4px;'>{}</td>" \
               "<td style='border:1px solid #ccc;padding:4px;'>{}</td></tr>"
-    rows = "\n".join([row_tpl.format(int(k), str(v)) for k, v in sorted(id2name.items())])
+
+    def _sort_key(item):
+        k, _ = item
+        try:
+            return (0, int(k))
+        except Exception:
+            return (1, str(k))
+
+    rows = "\n".join([row_tpl.format(k, str(v)) for k, v in sorted(id2name.items(), key=_sort_key)])
     return f"""
     <div style="background:#f9fbfd;color:#ff0000;padding:12px;border:1px solid #e6ecf5;">
       <style>

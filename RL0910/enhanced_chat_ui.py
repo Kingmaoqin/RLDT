@@ -1132,41 +1132,88 @@ def create_gradio_interface():
             """Create visualization for patient information"""
             if not patient_info or "error" in patient_info:
                 return None
-            
+
+            meta = data_manager.get_current_meta()
+            feature_stats = meta.get('feature_stats', {})
+            feature_ranges = meta.get('feature_ranges', {})
+
             fig, axes = plt.subplots(2, 2, figsize=(10, 8))
             fig.suptitle(f'Patient {patient_info.get("patient_id", "Unknown")} Overview', fontsize=14)
-            
-            # 1. Current vital signs
-            ax = axes[0, 0]
+
             current_state = patient_info.get('current_state', {})
-            vitals = ['blood_pressure', 'heart_rate', 'glucose', 'oxygen_saturation']
-            values = [current_state.get(v, 0.5) for v in vitals]
-            colors = ['red' if abs(v - 0.5) > 0.2 else 'green' for v in values]
-            
-            bars = ax.bar(range(len(vitals)), values, color=colors, alpha=0.7)
-            ax.axhline(y=0.5, color='black', linestyle='--', alpha=0.5, label='Normal')
-            ax.set_xticks(range(len(vitals)))
-            ax.set_xticklabels(['BP', 'HR', 'Glucose', 'O2 Sat'])
-            ax.set_ylim(0, 1)
-            ax.set_ylabel('Normalized Value')
-            ax.set_title('Current Vital Signs')
-            ax.legend()
-            
-            # 2. Treatment history
+
+            # 1. Current feature snapshot (auto-select top-variance features)
+            ax = axes[0, 0]
+            ranked = sorted(
+                feature_stats.items(),
+                key=lambda kv: abs(kv[1].get('std', 0.0)),
+                reverse=True,
+            )
+            chosen = [k for k, _ in ranked[:4]] or list(current_state.keys())[:4]
+            values = []
+            bars = []
+            labels = []
+            normalized = []
+            for key in chosen:
+                if key not in current_state:
+                    continue
+                val = current_state.get(key)
+                if val is None:
+                    continue
+                rng = feature_ranges.get(key) or {}
+                lo, hi = rng.get('min', 0.0), rng.get('max', 1.0)
+                span = hi - lo
+                if span > 1e-6:
+                    norm = (float(val) - lo) / span
+                else:
+                    norm = 0.5
+                normalized.append(float(np.clip(norm, 0.0, 1.0)))
+                values.append(float(val))
+                labels.append(key)
+
+            if labels:
+                colors = ['#ef4444' if abs(v - 0.5) > 0.2 else '#22c55e' for v in normalized]
+                bars = ax.bar(range(len(labels)), normalized, color=colors, alpha=0.75)
+                ax.axhline(y=0.5, color='black', linestyle='--', alpha=0.4, label='Cohort mid')
+                ax.set_xticks(range(len(labels)))
+                ax.set_xticklabels(labels, rotation=30, ha='right')
+                ax.set_ylim(0, 1)
+                ax.set_ylabel('Relative Position')
+                ax.set_title('Current Feature Snapshot')
+                for idx, (b, val) in enumerate(zip(bars, values)):
+                    ax.text(b.get_x() + b.get_width() / 2, normalized[idx] + 0.03,
+                            f"{val:.3f}", ha='center', fontsize=8)
+                ax.legend()
+            else:
+                ax.axis('off')
+                ax.text(0.5, 0.5, 'No numeric features', ha='center', va='center')
+
+            # 2. Treatment history (label-aware)
             ax = axes[0, 1]
-            treatment_history = patient_info.get('treatment_history', [])[-20:]  # Last 20
+            treatment_history = patient_info.get('treatment_history', [])[-20:]
+            treatment_labels = patient_info.get('treatment_labels', [])[-20:]
             if treatment_history:
-                ax.plot(treatment_history, 'o-', markersize=6)
+                label_map = {}
+                encoded = []
+                for raw, label in zip(treatment_history, treatment_labels or treatment_history):
+                    name = str(label) if label is not None else str(raw)
+                    if name not in label_map:
+                        label_map[name] = len(label_map)
+                    encoded.append(label_map[name])
+                ax.plot(encoded, 'o-', markersize=6)
                 ax.set_xlabel('Time Step')
                 ax.set_ylabel('Treatment')
-                ax.set_yticks([0, 1, 2, 3, 4])
-                ax.set_yticklabels(['Med A', 'Med B', 'Med C', 'Placebo', 'Combo'])
+                ax.set_yticks(list(label_map.values()))
+                ax.set_yticklabels(list(label_map.keys()))
                 ax.set_title('Recent Treatment History')
                 ax.grid(True, alpha=0.3)
-            
+            else:
+                ax.axis('off')
+                ax.text(0.5, 0.5, 'No treatments recorded', ha='center', va='center')
+
             # 3. Outcome history
             ax = axes[1, 0]
-            outcome_history = patient_info.get('outcome_history', [])[-20:]  # Last 20
+            outcome_history = patient_info.get('outcome_history', [])[-20:]
             if outcome_history:
                 ax.plot(outcome_history, 'b-', linewidth=2)
                 ax.fill_between(range(len(outcome_history)), outcome_history, alpha=0.3)
@@ -1175,23 +1222,32 @@ def create_gradio_interface():
                 ax.set_title('Outcome Trajectory')
                 ax.grid(True, alpha=0.3)
                 ax.axhline(y=0, color='red', linestyle='--', alpha=0.5)
-            
+            else:
+                ax.axis('off')
+                ax.text(0.5, 0.5, 'No outcomes recorded', ha='center', va='center')
+
             # 4. Patient details
             ax = axes[1, 1]
             ax.axis('off')
+            gender_val = current_state.get('gender')
+            if isinstance(gender_val, (int, float)) and gender_val in (0, 1):
+                gender_label = 'Male' if int(gender_val) == 1 else 'Female'
+            else:
+                gender_label = str(gender_val) if gender_val is not None else 'Unknown'
+            last_action_label = current_state.get('last_action_label') or str(current_state.get('last_action', '-'))
             details_text = f"""Patient Details:
-            
+
         - ID: {patient_info.get('patient_id', 'Unknown')}
-        - Age: {int(current_state.get('age', 45))} years
-        - Gender: {'Male' if current_state.get('gender', 0) == 1 else 'Female'}
+        - Age: {current_state.get('age', 'N/A')}
+        - Gender: {gender_label}
         - Total Records: {patient_info.get('total_records', 0)}
         - Current Step: {current_state.get('timestep', 0)}
-        - Last Action: {current_state.get('last_action', -1)}
+        - Last Action: {last_action_label}
         - Last Reward: {current_state.get('last_reward', 0):.3f}"""
-            
+
             ax.text(0.1, 0.5, details_text, fontsize=11, verticalalignment='center',
                     bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
-            
+
             plt.tight_layout()
             return fig
 
@@ -1653,6 +1709,19 @@ def create_gradio_interface():
 
             if isinstance(duration, (int, float)):
                 summary += f"\n- Duration: **{duration:.1f}s**"
+
+            meta = data_manager.get_current_meta()
+            last_training = meta.get("last_training") if isinstance(meta, dict) else None
+            if isinstance(last_training, dict):
+                stamp = last_training.get("recorded_at")
+                duration_meta = last_training.get("duration_sec")
+                summary += "\n\n**Logged run:**"
+                if stamp:
+                    summary += f"\n- Recorded at: `{stamp}`"
+                if duration_meta is not None:
+                    summary += f"\n- Logged duration: {duration_meta:.1f}s"
+                if last_training.get("samples"):
+                    summary += f"\n- Samples tracked: {last_training['samples']}"
 
             summary += "\n\nThe recommendation engine now reflects this dataset."
 

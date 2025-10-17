@@ -10,12 +10,18 @@ os.environ.setdefault("PANDAS_USE_PYARROW_EXTENSION_ARRAY", "0")
 os.environ.setdefault("PANDAS_USE_PYARROW_BACKEND", "0")
 
 import numpy as np
-from typing import Dict, List, Optional, Union, Tuple
+from typing import Dict, List, Optional, Union, Tuple, Any
+from datetime import datetime
 from data import PatientDataGenerator
 import json
 from adapters import TabularAdapter, SensorAdapter
 from schema import SchemaSpec
 from pandas_compat import get_pandas
+
+try:
+    import yaml
+except Exception:
+    yaml = None
 
 pd = get_pandas()
 
@@ -30,6 +36,11 @@ class DataManager:
         self.real_data_path = None
         self.current_meta = {}
         self.current_schema = {}
+        self.training_history = []
+
+    # ------------------------------------------------------------------
+    # Convenience accessors & helpers
+    # ------------------------------------------------------------------
 
     def get_current_meta(self) -> dict:
         """Return metadata for the current dataset."""
@@ -39,6 +50,73 @@ class DataManager:
         """Return schema information for the current dataset."""
         return getattr(self, "current_schema", {}) or {}
 
+
+    def _resolve_action_name(self, action_value: Union[int, str]) -> str:
+        """Resolve an action identifier to a display name using cached metadata."""
+
+        meta = self.get_current_meta()
+        action_map = meta.get("action_map") or {}
+        candidates = [action_value, str(action_value)]
+        for candidate in candidates:
+            if candidate in action_map:
+                return str(action_map[candidate])
+            try:
+                icandidate = int(candidate)
+            except Exception:
+                continue
+            if icandidate in action_map:
+                return str(action_map[icandidate])
+
+        action_names = meta.get("action_names") or []
+        if isinstance(action_value, (int, np.integer)) and int(action_value) < len(action_names):
+            return str(action_names[int(action_value)])
+        return str(action_value)
+
+    def _update_feature_metadata(self, df: "pd.DataFrame", feature_cols: List[str]):
+        """Compute descriptive statistics for feature columns to improve UI scaling."""
+
+        if df is None or not len(feature_cols):
+            return
+
+        stats = {}
+        name_map = {}
+        for col in feature_cols:
+            series = pd.to_numeric(df[col], errors="coerce")
+            clean = col[6:] if str(col).startswith("state_") else str(col)
+            stats[clean] = {
+                "min": float(series.min(skipna=True)) if len(series) else 0.0,
+                "max": float(series.max(skipna=True)) if len(series) else 0.0,
+                "mean": float(series.mean(skipna=True)) if len(series) else 0.0,
+                "std": float(series.std(skipna=True)) if len(series) else 0.0,
+                "column": str(col),
+            }
+            name_map[clean] = str(col)
+
+        meta = self.current_meta or {}
+        meta["feature_stats"] = stats
+        meta["feature_ranges"] = {
+            k: {"min": v.get("min", 0.0), "max": v.get("max", 0.0)}
+            for k, v in stats.items()
+        }
+        meta["feature_column_map"] = name_map
+        self.current_meta = meta
+
+    def register_training_run(self, summary: Dict[str, Any]):
+        """Append a training summary for diagnostics and UI messaging."""
+
+        summary = dict(summary)
+        summary.setdefault("recorded_at", datetime.now().isoformat())
+
+        history = list(getattr(self, "training_history", []) or [])
+        history.append(summary)
+        self.training_history = history
+
+        meta = self.get_current_meta()
+        runs = list(meta.get("training_runs", []))
+        runs.append(summary)
+        meta["training_runs"] = runs
+        meta["last_training"] = summary
+        self.current_meta = meta
 
     def generate_virtual_data(self, n_patients: int = 1000, seed: int = 42) -> pd.DataFrame:
         """生成虚拟数据"""
@@ -68,13 +146,22 @@ class DataManager:
             else []
         )
         action_names = [f"Action {a}" for a in unique_actions]
+        action_map = None
+        if unique_actions:
+            action_map = {}
+            for raw, name in zip(unique_actions, action_names):
+                try:
+                    key = int(raw)
+                except Exception:
+                    key = raw
+                action_map[key] = name
+
         self.current_meta = {
             "feature_columns": feature_cols,
             "action_names": action_names if action_names else None,
-            "action_map": {
-                a: name for a, name in zip(unique_actions, action_names)
-            } if unique_actions else None,
+            "action_map": action_map,
         }
+        self._update_feature_metadata(self.virtual_data, feature_cols)
         self.current_source = "virtual"
         print(f"Generated {len(self.virtual_data)} records for {n_patients} patients")
         return self.virtual_data
@@ -111,20 +198,55 @@ class DataManager:
                 if "action" in self.real_data.columns
                 else []
             )
-            action_names = [f"Action {a}" for a in unique_actions]
+            action_names = [str(a) for a in unique_actions]
+            action_map = {}
+            for raw in unique_actions:
+                key = raw
+                try:
+                    key = int(raw)
+                except Exception:
+                    pass
+                action_map[key] = str(raw)
             self.current_meta = {
                 "feature_columns": feature_cols,
                 "action_names": action_names if action_names else None,
-                "action_map": {
-                    a: name for a, name in zip(unique_actions, action_names)
-                } if unique_actions else None,
+                "action_map": action_map if action_map else None,
             }
+            self._update_feature_metadata(self.real_data, feature_cols)
 
             self.current_source = "real"
             return self.real_data
         except Exception as e:
             print(f"Error loading real data: {e}")
             raise
+
+    def _load_schema_spec(self,
+                          schema_path: Optional[str] = None,
+                          schema_yaml: Optional[str] = None) -> "SchemaSpec":
+        """Parse SchemaSpec with graceful fallback for older deployments."""
+
+        from schema import SchemaSpec
+
+        if schema_yaml:
+            loader = getattr(SchemaSpec, "from_yaml_text", None)
+            if callable(loader):
+                return loader(schema_yaml)
+            if yaml is None:
+                raise ImportError("PyYAML is required to parse inline schema text")
+            data = yaml.safe_load(schema_yaml)
+            return SchemaSpec.from_dict(data)
+
+        if schema_path:
+            loader = getattr(SchemaSpec, "from_yaml_file", None)
+            if callable(loader):
+                return loader(schema_path)
+            if yaml is None:
+                raise ImportError("PyYAML is required to parse schema files")
+            with open(schema_path, "r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh.read())
+            return SchemaSpec.from_dict(data)
+
+        raise ValueError("真实数据需要提供 schema_path 或 schema_yaml 才能映射到统一结构")
 
     def load_real_data_with_schema(self,
                                 file_path: str,
@@ -135,7 +257,6 @@ class DataManager:
         使用 YAML Schema 通过 adapters 将任意真实数据映射到统一 RL 结构，
         并落地到 self.real_data / self.current_meta。
         """
-        from schema import SchemaSpec
         from adapters import TabularAdapter, SensorAdapter
 
         # 1) 读取 Schema
@@ -144,7 +265,7 @@ class DataManager:
         elif schema_path:
             spec = SchemaSpec.from_yaml_file(schema_path)
         else:
-            raise ValueError("真实数据需要提供 schema_path 或 schema_yaml 才能映射到统一结构")
+            raise ValueError("Real data need schema_path or schema_yaml")
 
         # 2) 选择适配器
         kind = getattr(spec, "kind", "tabular").lower()
@@ -202,6 +323,7 @@ class DataManager:
             }
 
         self.current_meta = meta  # <— 供 UI/推理使用
+        self._update_feature_metadata(df, feature_columns)
         self.current_schema = spec
 
         print(f"[DataManager] Real data (schema) loaded: {len(df)} rows, "
@@ -271,14 +393,29 @@ class DataManager:
             feature_cols = [new_names[c] for c in feature_cols]
 
         # 5) 更新管理器缓存与 meta
+        unique_actions = (
+            sorted(pd.unique(df["action"].dropna()))
+            if "action" in df.columns
+            else []
+        )
         self.real_data = df
         self.real_data_path = file_path
         self.current_source = "real"
+        action_map = {}
+        for raw in unique_actions:
+            key = raw
+            try:
+                key = int(raw)
+            except Exception:
+                pass
+            action_map[key] = str(raw)
+
         self.current_meta = {
             "feature_columns": feature_cols,
-            "action_names": None,   # 可在 UI 里按需要推断/显示 id
-            "action_map": None,
+            "action_names": [str(a) for a in unique_actions] if len(unique_actions) else None,
+            "action_map": action_map if action_map else None,
         }
+        self._update_feature_metadata(df, feature_cols)
         print(f"[DataManager] Real schema-less loaded: {len(df)} rows, "
             f"{df['patient_id'].nunique()} patients, {len(feature_cols)} features.")
         return df
@@ -325,15 +462,23 @@ class DataManager:
         latest_record = patient_data.iloc[-1]
         
         # 构建患者信息
+        meta = self.get_current_meta()
+        current_state = self._extract_state_from_record(latest_record)
+
+        def _labelize(val):
+            return self._resolve_action_name(val)
+
         patient_info = {
             'patient_id': patient_id,
             'total_records': len(patient_data),
-            'current_state': self._extract_state_from_record(latest_record),
+            'current_state': current_state,
             'trajectory': self._get_patient_trajectory(patient_data),
             'treatment_history': patient_data['action'].tolist(),
-            'outcome_history': patient_data['reward'].tolist()
+            'treatment_labels': [_labelize(v) for v in patient_data['action'].tolist()],
+            'outcome_history': patient_data['reward'].tolist(),
+            'feature_stats': meta.get('feature_stats', {}),
         }
-        
+
         return patient_info
     
     def get_patient_state(self, patient_id: str, timestep: Optional[int] = None) -> Dict:
@@ -362,24 +507,25 @@ class DataManager:
         
         # 提取状态特征
         feature_columns = [col for col in record.index if col.startswith('state_') and not col.startswith('next_state_')]
-        
+
         for col in feature_columns:
             feature_name = col.replace('state_', '')
             value = record[col]
-            
-            # 转换特征名称和值
-            if feature_name == 'age':
-                state['age'] = int(value * 72 + 18)  # 转换回实际年龄
-            elif feature_name == 'gender':
-                state['gender'] = int(value)
-            else:
+            try:
                 state[feature_name] = float(value)
-        
+            except Exception:
+                state[feature_name] = value
+
         # 添加其他信息
         state['timestep'] = int(record.get('timestep', 0))
-        state['last_action'] = int(record.get('action', -1))
+        last_action_val = record.get('action', -1)
+        try:
+            state['last_action'] = int(last_action_val)
+        except Exception:
+            state['last_action'] = last_action_val
+        state['last_action_label'] = self._resolve_action_name(last_action_val)
         state['last_reward'] = float(record.get('reward', 0))
-        
+
         return state
     
     def _get_patient_trajectory(self, patient_data: pd.DataFrame) -> List[Dict]:
@@ -388,10 +534,16 @@ class DataManager:
         
         for _, record in patient_data.iterrows():
             state = self._extract_state_from_record(record)
+            act = record['action']
+            try:
+                act_id = int(act)
+            except Exception:
+                act_id = act
             trajectory.append({
                 'timestep': state['timestep'],
                 'state': state,
-                'action': int(record['action']),
+                'action': act_id,
+                'action_label': self._resolve_action_name(act),
                 'reward': float(record['reward'])
             })
         

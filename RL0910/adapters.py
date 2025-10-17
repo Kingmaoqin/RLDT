@@ -107,9 +107,17 @@ def _build_meta(df: pd.DataFrame, spec: SchemaSpec, mp: ColumnMapping) -> Dict[s
     feature_names = spec.feature_names or mp.feature_cols
 
     # 基本 meta
+    action_map = {}
+    for idx, name in enumerate(action_names):
+        try:
+            action_map[int(idx)] = str(name)
+        except Exception:
+            action_map[idx] = str(name)
+
     meta_dict = dict(
         feature_names=feature_names,
         action_names=action_names,
+        action_map=action_map if action_map else None,
         trajectory_id_col=mp.trajectory_id,
         timestep_col=mp.timestep,
         action_col=a_col,
