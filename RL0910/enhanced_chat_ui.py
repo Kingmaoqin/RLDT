@@ -2,12 +2,17 @@
 enhanced_chat_ui.py - Enhanced UI for DRIVE with online learning and hot parameter updates
 """
 
+import os
+
+# Keep pandas compatible with older pyarrow wheels by disabling the Arrow backend
+# before any module-level pandas import occurs (drive_tools, data_manager, etc.).
+os.environ.setdefault("PANDAS_USE_PYARROW_BACKEND", "0")
+os.environ.setdefault("PANDAS_USE_PYARROW_EXTENSION_ARRAY", "0")
+
 import gradio as gr
 import json
 import argparse
 import sys
-import os
-import pandas as pd
 from datetime import datetime
 from langchain_core.messages import HumanMessage
 from agent_graph import drive_agent, AgentState
@@ -370,12 +375,8 @@ def create_gradio_interface():
     """Create the full Gradio interface with chat, parameter control, and online learning monitor"""
     
     # Initialize models
-    print("Initializing system with online learning...")
+    print("Preparing inference models... (online training stays paused until started from the UI)")
     inference_engine, cds = load_models_and_initialize()
-    
-    # Initialize data manager with virtual data
-    print("Generating initial virtual data...")
-    data_manager.generate_virtual_data(n_patients=100)
     
     print("Initializing evaluation system...")
     evaluation_pipeline = create_online_evaluation_pipeline(
@@ -389,425 +390,438 @@ def create_gradio_interface():
     with gr.Blocks(title="Real-time Interactive Clinical Navigator", theme=gr.themes.Soft()) as demo:
         gr.Markdown("""
         # 🏥 Real-time Interactive Clinical Navigator
-        
+
         **AI-powered treatment recommendations with explainable causal reasoning**
-        
+
         ✨ **New Features**:
         - 🔄 Online Learning: Continuously adapts to new data
         - ⚡ Hot Parameter Updates: Change settings without retraining
         - 🎯 Active Learning: Only queries uncertain cases
         - 📊 Real-time Training Monitor
+        - 🤖 LLM Co-Pilot: Context-aware help available on every page
         """)
-        
-        with gr.Tabs():
-            # Tab 1: Data Management
-            with gr.Tab("📊 Data Management"):
-                gr.Markdown("### Data Source Configuration")
-                
-                with gr.Row():
-                    data_source_radio = gr.Radio(
-                        choices=["Virtual Data", "Real Data"],
-                        value="Virtual Data",
-                        label="Data Source"
-                    )
-                    current_source_text = gr.Textbox(
-                        value="Current: Virtual Data",
-                        label="Active Source",
-                        interactive=False
-                    )
-                
-                # Virtual data options
-                with gr.Column(visible=True) as virtual_data_options:
-                    with gr.Row():
-                        n_patients_slider = gr.Slider(
-                            minimum=10,
-                            maximum=10000,
-                            value=100,
-                            step=10,
-                            label="Number of Patients"
+
+        with gr.Row():
+            with gr.Column(scale=4, min_width=720):
+                with gr.Tabs():
+                    # Tab 1: Data Management
+                    with gr.Tab("📊 Data Management"):
+                        gr.Markdown("### Data Source Configuration")
+
+                        gr.Markdown(
+                            "> Choose a source to unlock the controls. No data is generated or loaded until you press one of the action buttons."
                         )
-                        generate_btn = gr.Button("Generate Virtual Data", variant="primary")
-                
-                # Real data options
-                with gr.Column(visible=False) as real_data_options:
-                    with gr.Row():
-                        file_upload = gr.File(label="Upload Data File", file_types=[".csv", ".parquet", ".xlsx", ".xls"])
-                        schema_upload = gr.File(label="Upload Schema YAML (optional but recommended)", file_types=[".yaml", ".yml"])
-                        load_real_btn = gr.Button("Load Real Data", variant="primary")
+
+                        with gr.Row():
+                            data_source_radio = gr.Radio(
+                                choices=["Virtual Data", "Real Data"],
+                                value=None,
+                                label="Data Source",
+                                info="Select the cohort you want to work with before loading any records"
+                            )
+                            current_source_text = gr.Textbox(
+                                value="No dataset loaded. Choose a source to begin.",
+                                label="Active Source",
+                                interactive=False
+                            )
+
+                        # Virtual data options
+                        with gr.Column(visible=False) as virtual_data_options:
+                            with gr.Row():
+                                n_patients_slider = gr.Slider(
+                                    minimum=10,
+                                    maximum=10000,
+                                    value=100,
+                                    step=10,
+                                    label="Number of Patients"
+                                )
+                                generate_btn = gr.Button("Generate Virtual Data", variant="primary")
+
+                        # Real data options
+                        with gr.Column(visible=False) as real_data_options:
+                            with gr.Row():
+                                file_upload = gr.File(label="Upload Data File", file_types=[".csv", ".parquet", ".xlsx", ".xls"])
+                                schema_upload = gr.File(label="Upload Schema YAML (optional but recommended)", file_types=[".yaml", ".yml"])
+                                load_real_btn = gr.Button("Load Real Data", variant="primary")
 
 
-                
-                # Data statistics
-                gr.Markdown("### Dataset Overview")
-                current_source_text = gr.Textbox(label="Active Source", interactive=False)
-                stats_display = gr.Image(label="Dataset Statistics", interactive=False)
-                action_legend = gr.HTML(label="Action Legend", visible=False)
 
-                # Patient selection
-                gr.Markdown("### Patient Selection")
-                with gr.Row():
-                    patient_dropdown = gr.Dropdown(
-                        label="Select Patient",
-                        choices=[],
-                        value=None
-                    )
-                    refresh_patients_btn = gr.Button("🔄 Refresh List")
-                
-                # Patient details
-                with gr.Row():
-                    patient_info_display = gr.Plot(label="Patient Information")
-                    generate_report_btn = gr.Button("🧾 Generate Patient Report", variant="primary")
-                    patient_report_html = gr.HTML(visible=True)
-                    patient_analysis_display = gr.Image(label="Treatment Analysis", visible=False)
-                    report_download = gr.File(label="Report (HTML)", visible=False)
+                        data_stage_message = gr.Markdown(
+                            "👋 **Step 1:** Select a data source above and press the corresponding button to load it.",
+                            elem_classes=["data-stage-banner"]
+                        )
 
-                    def _on_generate_report(pid):
-                        try:
-                            if not pid:
-                                return "No patient selected", None, gr.update(visible=False)
-                            html, img, path = generate_patient_report_ui(pid, topk=3, fmt="html")
-                            return html, img, gr.update(value=path, visible=bool(path))
-                        except Exception as e:
-                            return f"<p>Report error: {e}</p>", None, gr.update(visible=False)
+                        # Data statistics
+                        gr.Markdown("### Dataset Overview")
+                        stats_display = gr.Image(label="Dataset Statistics", interactive=False, value=None)
+                        action_legend = gr.HTML(label="Action Legend", visible=False)
+
+                        # Patient selection
+                        gr.Markdown("### Patient Selection")
+                        with gr.Row():
+                            patient_dropdown = gr.Dropdown(
+                                label="Select Patient",
+                                choices=[],
+                                value=None,
+                                interactive=False
+                            )
+                            refresh_patients_btn = gr.Button("🔄 Refresh List")
+
+                        # Patient details
+                        with gr.Row():
+                            patient_info_display = gr.Plot(label="Patient Information")
+                            generate_report_btn = gr.Button("🧾 Generate Patient Report", variant="primary")
+                            patient_report_html = gr.HTML(visible=True)
+                            patient_analysis_display = gr.Image(label="Treatment Analysis", visible=False)
+                            report_download = gr.File(label="Report (HTML)", visible=False)
+
+                            def _on_generate_report(pid):
+                                try:
+                                    if not pid:
+                                        return "No patient selected", None, gr.update(visible=False)
+                                    html, img, path = generate_patient_report_ui(pid, topk=3, fmt="html")
+                                    return html, img, gr.update(value=path, visible=bool(path))
+                                except Exception as e:
+                                    return f"<p>Report error: {e}</p>", None, gr.update(visible=False)
 
 
-                
-                with gr.Row():
-                    analyze_btn = gr.Button("Analyze Patient", variant="secondary", visible=False)
-                    export_btn = gr.Button("Export Patient Data")
-                
-                export_output = gr.File(label="Exported Data", visible=False)
-            
-            # Tab 2: Chat Interface
-            with gr.Tab("💬 Clinical Consultation"):
-                with gr.Row():
-                    active_patient_display = gr.Textbox(
-                        label="Active Patient",
-                        value="No patient selected",
-                        interactive=False
-                    )
-                
-                chatbot = gr.Chatbot(height=400, type="messages")
+
+                        with gr.Row():
+                            analyze_btn = gr.Button("Analyze Patient", variant="secondary", visible=False)
+                            export_btn = gr.Button("Export Patient Data")
+
+                        export_output = gr.File(label="Exported Data", visible=False)
+
+                    # Tab 2: Parameter Control
+                    with gr.Tab("⚙️ Parameter Control"):
+                        gr.Markdown("### Model Parameter Configuration")
+
+                        with gr.Row():
+                            preset_dropdown = gr.Dropdown(
+                                choices=["Conservative", "Balanced", "Aggressive", "Custom"],
+                                value="Balanced",
+                                label="Parameter Preset",
+                                info="Select a preset or choose Custom to adjust manually"
+                            )
+                            recommend_btn = gr.Button("📊 Get Recommendations", scale=2)
+
+                        with gr.Column(visible=False) as custom_params:
+                            gr.Markdown("### Custom Parameters")
+
+                            with gr.Row():
+                                alpha_slider = gr.Slider(
+                                    minimum=0.1, maximum=2.0, value=1.0, step=0.1,
+                                    label="Alpha (α) - Conservative Q-Learning Weight",
+                                    info="Higher = more conservative recommendations"
+                                )
+                                alpha_info = gr.Button("❓", scale=0)
+
+                            with gr.Row():
+                                gamma_slider = gr.Slider(
+                                    minimum=0.9, maximum=0.999, value=0.99, step=0.001,
+                                    label="Gamma (γ) - Discount Factor",
+                                    info="Higher = values long-term outcomes more"
+                                )
+                                gamma_info = gr.Button("❓", scale=0)
+
+                            with gr.Row():
+                                lr_slider = gr.Slider(
+                                    minimum=1e-4, maximum=1e-2, value=1e-3, step=1e-4,
+                                    label="Learning Rate",
+                                    info="Lower = slower but more stable learning"
+                                )
+                                lr_info = gr.Button("❓", scale=0)
+
+                            with gr.Row():
+                                reg_slider = gr.Slider(
+                                    minimum=0.001, maximum=0.1, value=0.01, step=0.001,
+                                    label="Regularization Weight (λ)",
+                                    info="Higher = stronger deconfounding"
+                                )
+                                reg_info = gr.Button("❓", scale=0)
+
+                            with gr.Row():
+                                batch_slider = gr.Slider(
+                                    minimum=32, maximum=512, value=256, step=32,
+                                    label="Batch Size",
+                                    info="Larger = smoother gradients"
+                                )
+                                batch_info = gr.Button("❓", scale=0)
+
+                            with gr.Row():
+                                epoch_slider = gr.Slider(
+                                    minimum=10, maximum=100, value=50, step=5,
+                                    label="Number of Epochs",
+                                    info="More epochs = better learning (with overfit risk)"
+                                )
+                                epoch_info = gr.Button("❓", scale=0)
+                        recommendations_display = gr.Markdown("Click 'Get Recommendations' to see suggested configurations")
+
+                        with gr.Row():
+                            confirm_apply = gr.Checkbox(label="I confirm these parameter changes", value=False)
+                            apply_btn = gr.Button("✅ Apply Configuration", variant="primary")
+
+                        apply_output = gr.Textbox(label="Configuration Status", lines=3)
+
+                        gr.Markdown("### Model Retraining")
+                        gr.Markdown("""
+                        ⚡ **Note**: With the new online learning system, full retraining is rarely needed!
+
+                        - **Hot Updates**: Parameter changes like α, γ, learning rate apply instantly or with quick finetuning
+                        - **Online Learning**: The model continuously learns from new data
+                        - **Active Learning**: Only queries uncertain cases, reducing labeling cost
+
+                        Full retraining is now only recommended for major architectural changes.
+                        """)
+
+                        with gr.Row():
+                            confirm_retrain = gr.Checkbox(label="I want to trigger online adaptation (5-10 min)", value=False)
+                            retrain_btn = gr.Button("🔄 Start Online Adaptation", variant="primary")
+
+                        retrain_output = gr.Markdown()
+                    # Tab 3: Online Learning Monitor
+                    with gr.Tab("📊 Online Learning Monitor") as online_tab:
+                        gr.Markdown("### Real-time Training Statistics")
+                        gr.Markdown(
+                            "> ℹ️ The online trainer stays paused after launch. Press **Start Online Training** when you are ready to stream new data."
+                        )
+
+                        # 按钮行
+                        with gr.Row():
+                            refresh_stats_btn = gr.Button("🔄 Refresh Stats", variant="primary")
+                            pause_btn = gr.Button("⏸️ Pause Training")
+                            resume_btn = gr.Button("▶️ Start Online Training")
+                            evaluate_btn = gr.Button("📊 Run Evaluation", variant="secondary") # 添加这个
+
+                        # 统计数据显示和 Active Learning Statistics JSON 显示在同一行，分成两列
+                        with gr.Row():
+                            with gr.Column(scale=1): # 左侧的统计数字列
+                                total_transitions = gr.Number(label="Total Transitions Seen", value=0)
+                                query_rate = gr.Number(label="Query Rate (%)", value=0)
+                                buffer_size = gr.Number(label="Labeled Buffer Size", value=0)
+
+                                avg_uncertainty = gr.Number(label="Average Uncertainty", value=0)
+                                current_tau = gr.Number(label="Current Threshold (τ)", value=0.05)
+                                training_updates = gr.Number(label="Total Updates", value=0)
+
+                            with gr.Column(scale=2): # 右侧的 Active Learning Statistics 显示列
+                                # 使用图表替代JSON
+                                al_stats_plot = gr.Plot(label="Active Learning Statistics")
+                                al_stats_table = gr.Dataframe(
+                                    headers=["Metric", "Value"],
+                                    label="Statistics Summary",
+                                    interactive=False,
+                                )
+
+                        gr.Markdown("### ⚙️ Evaluation Settings")
+                        with gr.Row():
+                            eval_duration_slider = gr.Slider(
+                                minimum=30,
+                                maximum=600,
+                                value=60,
+                                step=30,
+                                label="Evaluation Duration (seconds)",
+                                info="How long to run the compliance evaluation",
+                            )
+                            eval_scenario_dropdown = gr.Dropdown(
+                                choices=["Quick Test", "Standard Evaluation", "Full Compliance Check"],
+                                value="Standard Evaluation",
+                                label="Evaluation Scenario",
+                            )
+                            start_eval_btn = gr.Button("🚀 Start Custom Evaluation", variant="primary")
+
+                        gr.Markdown("### 👨‍⚕️ Expert Feedback Mode")
+                        gr.Markdown("""
+                        **Instructions for Expert Labeling:**
+                        - The system queries uncertain cases where the model needs expert input
+                        - You can choose between automatic simulation or manual expert labeling
+                        - For manual labeling, adjust the reward value based on clinical outcome
+
+                        **Reward Guidelines:**
+                        - **Positive values (0 to +5)**: Patient improved (higher = better improvement)
+                        - **Near zero (-1 to +1)**: Stable condition, minimal change
+                        - **Negative values (-5 to 0)**: Patient deteriorated (lower = worse deterioration)
+                        - Consider: vital sign changes, symptom relief, adverse events
+                        """)
+
+                        with gr.Row():
+                            expert_mode = gr.Radio(
+                                choices=["Automatic Simulation", "Manual Expert Input"],
+                                value="Automatic Simulation",
+                                label="Expert Feedback Mode",
+                                info="Choose how to handle uncertain cases requiring expert labels",
+                            )
+                            expert_queue_size = gr.Number(
+                                label="Pending Expert Reviews",
+                                value=0,
+                                interactive=False,
+                            )
+
+                        with gr.Row():
+                            # 显示当前待标注的案例
+                            with gr.Column(scale=2):
+                                current_case_display = gr.JSON(
+                                    label="Current Case for Review",
+                                    value={},
+                                )
+
+                            # 专家输入控制
+                            with gr.Column(scale=1):
+                                expert_reward_slider = gr.Slider(
+                                    minimum=-5.0,
+                                    maximum=5.0,
+                                    value=0.0,
+                                    step=0.1,
+                                    label="Expert Reward Assessment",
+                                    info="Slide to set the clinical outcome value",
+                                    interactive=False,
+                                )
+
+                                reward_interpretation = gr.Textbox(
+                                    label="Interpretation",
+                                    value="Neutral outcome",
+                                    interactive=False,
+                                )
+
+                                submit_expert_label_btn = gr.Button(
+                                    "✅ Submit Expert Label",
+                                    variant="primary",
+                                    interactive=False,
+                                )
+
+                                skip_case_btn = gr.Button(
+                                    "⏭️ Skip Case",
+                                    variant="secondary",
+                                    interactive=False,
+                                )
+                                refresh_case_btn = gr.Button(
+                                    "🔄 Get Next Case",
+                                    variant="secondary",
+                                )
+
+                        with gr.Row():
+                            expert_stats = gr.Textbox(
+                                label="Expert Labeling Statistics",
+                                value="No labels submitted yet",
+                                lines=3,
+                                interactive=False,
+                            )
+
+                        # Uncertainty threshold adjustment 部分
+                        gr.Markdown("### Adjust Active Learning Threshold")
+                        with gr.Row():
+                            tau_slider = gr.Slider(
+                                minimum=0.01, maximum=0.2, value=0.05, step=0.01,
+                                label="Uncertainty Threshold (τ)",
+                                info="Lower = query more samples, Higher = query fewer samples",
+                            )
+                            update_tau_btn = gr.Button("Update Threshold")
+
+                        tau_update_output = gr.Textbox(label="Update Status", lines=2)
+
+                        # 评估结果部分
+                        gr.Markdown("### Evaluation Results")
+                        with gr.Row():
+                            evaluation_text = gr.Textbox(
+                                label="Evaluation Report",
+                                lines=20,
+                                max_lines=30,
+                                interactive=False,
+                                visible=False,
+                            )
+                            evaluation_plot = gr.Image(label="Performance Metrics", visible=False)
+
+                        # 下载报告按钮
+                        with gr.Row():
+                            download_report_btn = gr.Button("📥 Download Report", visible=False)
+                            report_file = gr.File(label="Downloaded Report", visible=False)
+
+                        # 如何工作说明
+                        gr.Markdown("""
+                        ### How Online Learning Works
+
+                        1. **Active Learning**: Only uncertain samples are queried for expert labels
+                        2. **Incremental Updates**: Models update continuously without full retraining
+                        3. **Hot Parameters**: Change α, γ, lr instantly without stopping the system
+                        4. **Auto-save**: Models checkpoint every 10 minutes
+
+                        The system is learning in real-time while you use it!
+                        """)
+                    # Tab 4: Model Information
+                    with gr.Tab("📈 Model Information"):
+                        gr.Markdown("""
+                        ### Current Model Configuration
+
+                        **Model Paths**:
+                        - Dynamics Model: `{}`
+                        - Outcome Model: `{}`
+                        - Q-Network: `{}`
+
+                        **Architecture**:
+                        - State Dimension: 10 (patient features)
+                        - Action Space: 5 treatments
+                        - Dynamics Model: Transformer-based
+                        - Outcome Model: Deconfounded reward prediction
+                        - Policy: Conservative Q-Learning
+
+                        **Treatment Options**:
+                        1. Medication A - Primary glucose control
+                        2. Medication B - Blood pressure focus
+                        3. Medication C - Balanced approach
+                        4. Placebo - No active treatment
+                        5. Combination Therapy - Multi-drug approach
+
+                        **Patient Features**:
+                        - Age (normalized)
+                        - Gender (binary)
+                        - Blood Pressure
+                        - Heart Rate
+                        - Glucose Level
+                        - Creatinine
+                        - Hemoglobin
+                        - Temperature
+                        - Oxygen Saturation
+                        - BMI
+                        """.format(
+                            MODEL_PATHS["dynamics_model"],
+                            MODEL_PATHS["outcome_model"],
+                            MODEL_PATHS["q_network"]
+                        ))
+            with gr.Column(scale=1, min_width=320):
+                gr.Markdown("""
+                ### 🤖 Clinical Co-Pilot
+
+                Real-time LLM assistant to guide you through data curation,
+                parameter tuning, and evaluation workflows.
+                """)
+                active_patient_display = gr.Textbox(
+                    label="Active Patient",
+                    value="No patient selected",
+                    interactive=False
+                )
+                chatbot = gr.Chatbot(height=460, type="messages")
                 msg = gr.Textbox(
-                    label="Ask a question",
-                    placeholder="E.g., What's the best treatment? Why not use placebo? Simulate 7-day trajectory...",
+                    label="Ask anything about the RLDT system",
+                    placeholder="E.g., How do I update hyperparameters? Explain the latest recommendation...",
                     lines=2
                 )
                 with gr.Row():
                     submit = gr.Button("Send", variant="primary")
                     clear = gr.Button("Clear")
-                
+
                 gr.Examples(
                     examples=[
                         "What's the recommended treatment for this patient?",
-                        "Compare all treatment options",
-                        "Why recommend Medication A over Medication B?",
-                        "Simulate 7-day trajectory with Medication A",
-                        "What are the key factors in this decision?",
-                        "How would lowering the learning rate affect the model?",
-                        "Recommend parameters for this patient"
+                        "Explain the difference between Conservative and Aggressive presets.",
+                        "How can I monitor online learning progress?",
+                        "Simulate a 7-day trajectory for the current patient.",
+                        "What does the uncertainty threshold control?",
+                        "Recommend parameters for this patient",
+                        "How do I load real-world data into the system?"
                     ],
                     inputs=msg
                 )
-            
-            # Tab 3: Parameter Control
-            with gr.Tab("⚙️ Parameter Control"):
-                gr.Markdown("### Model Parameter Configuration")
-                
-                with gr.Row():
-                    preset_dropdown = gr.Dropdown(
-                        choices=["Conservative", "Balanced", "Aggressive", "Custom"],
-                        value="Balanced",
-                        label="Parameter Preset",
-                        info="Select a preset or choose Custom to adjust manually"
-                    )
-                    recommend_btn = gr.Button("📊 Get Recommendations", scale=2)
-                
-                with gr.Column(visible=False) as custom_params:
-                    gr.Markdown("### Custom Parameters")
-                    
-                    with gr.Row():
-                        alpha_slider = gr.Slider(
-                            minimum=0.1, maximum=2.0, value=1.0, step=0.1,
-                            label="Alpha (α) - Conservative Q-Learning Weight",
-                            info="Higher = more conservative recommendations"
-                        )
-                        alpha_info = gr.Button("❓", scale=0)
-                    
-                    with gr.Row():
-                        gamma_slider = gr.Slider(
-                            minimum=0.9, maximum=0.999, value=0.99, step=0.001,
-                            label="Gamma (γ) - Discount Factor",
-                            info="Higher = values long-term outcomes more"
-                        )
-                        gamma_info = gr.Button("❓", scale=0)
-                    
-                    with gr.Row():
-                        lr_slider = gr.Slider(
-                            minimum=1e-4, maximum=1e-2, value=1e-3, step=1e-4,
-                            label="Learning Rate",
-                            info="Lower = slower but more stable learning"
-                        )
-                        lr_info = gr.Button("❓", scale=0)
-                    
-                    with gr.Row():
-                        reg_slider = gr.Slider(
-                            minimum=0.001, maximum=0.1, value=0.01, step=0.001,
-                            label="Regularization Weight (λ)",
-                            info="Higher = stronger deconfounding"
-                        )
-                        reg_info = gr.Button("❓", scale=0)
-                    
-                    with gr.Row():
-                        batch_slider = gr.Slider(
-                            minimum=32, maximum=512, value=256, step=32,
-                            label="Batch Size",
-                            info="Larger = smoother gradients"
-                        )
-                        batch_info = gr.Button("❓", scale=0)
-                    
-                    with gr.Row():
-                        epoch_slider = gr.Slider(
-                            minimum=10, maximum=100, value=50, step=5,
-                            label="Number of Epochs",
-                            info="More epochs = better learning (with overfit risk)"
-                        )
-                        epoch_info = gr.Button("❓", scale=0)
-                
-                recommendations_display = gr.Markdown("Click 'Get Recommendations' to see suggested configurations")
-                
-                with gr.Row():
-                    confirm_apply = gr.Checkbox(label="I confirm these parameter changes", value=False)
-                    apply_btn = gr.Button("✅ Apply Configuration", variant="primary")
-                
-                apply_output = gr.Textbox(label="Configuration Status", lines=3)
-                
-                gr.Markdown("### Model Retraining")
-                gr.Markdown("""
-                ⚡ **Note**: With the new online learning system, full retraining is rarely needed!
-                
-                - **Hot Updates**: Parameter changes like α, γ, learning rate apply instantly or with quick finetuning
-                - **Online Learning**: The model continuously learns from new data
-                - **Active Learning**: Only queries uncertain cases, reducing labeling cost
-                
-                Full retraining is now only recommended for major architectural changes.
-                """)
-                
-                with gr.Row():
-                    confirm_retrain = gr.Checkbox(label="I want to trigger online adaptation (5-10 min)", value=False)
-                    retrain_btn = gr.Button("🔄 Start Online Adaptation", variant="primary")
-                
-                retrain_output = gr.Markdown()
-            
-            # Tab 4: Online Learning Monitor
-            with gr.Tab("📊 Online Learning Monitor"):
-                gr.Markdown("### Real-time Training Statistics")
-                
-                # 按钮行
-                with gr.Row():
-                    refresh_stats_btn = gr.Button("🔄 Refresh Stats", variant="primary")
-                    pause_btn = gr.Button("⏸️ Pause Training")
-                    resume_btn = gr.Button("▶️ Resume Training")
-                    evaluate_btn = gr.Button("📊 Run Evaluation", variant="secondary") # 添加这个
-                
-                # 统计数据显示和 Active Learning Statistics JSON 显示在同一行，分成两列
-                with gr.Row():
-                    with gr.Column(scale=1): # 左侧的统计数字列
-                        total_transitions = gr.Number(label="Total Transitions Seen", value=0)
-                        query_rate = gr.Number(label="Query Rate (%)", value=0)
-                        buffer_size = gr.Number(label="Labeled Buffer Size", value=0)
-                        
-                        avg_uncertainty = gr.Number(label="Average Uncertainty", value=0)
-                        current_tau = gr.Number(label="Current Threshold (τ)", value=0.05)
-                        training_updates = gr.Number(label="Total Updates", value=0)
-                    
-                    with gr.Column(scale=2): # 右侧的 Active Learning Statistics 显示列
-                        # 使用图表替代JSON
-                        al_stats_plot = gr.Plot(label="Active Learning Statistics")
-                        al_stats_table = gr.Dataframe(
-                            headers=["Metric", "Value"],
-                            label="Statistics Summary",
-                            interactive=False
-                        )
 
-                gr.Markdown("### ⚙️ Evaluation Settings")
-                with gr.Row():
-                    eval_duration_slider = gr.Slider(
-                        minimum=30,
-                        maximum=600,
-                        value=60,
-                        step=30,
-                        label="Evaluation Duration (seconds)",
-                        info="How long to run the compliance evaluation"
-                    )
-                    eval_scenario_dropdown = gr.Dropdown(
-                        choices=["Quick Test", "Standard Evaluation", "Full Compliance Check"],
-                        value="Standard Evaluation",
-                        label="Evaluation Scenario"
-                    )
-                    start_eval_btn = gr.Button("🚀 Start Custom Evaluation", variant="primary")
-                   
-                gr.Markdown("### 👨‍⚕️ Expert Feedback Mode")
-                gr.Markdown("""
-                **Instructions for Expert Labeling:**
-                - The system queries uncertain cases where the model needs expert input
-                - You can choose between automatic simulation or manual expert labeling
-                - For manual labeling, adjust the reward value based on clinical outcome
-                
-                **Reward Guidelines:**
-                - **Positive values (0 to +5)**: Patient improved (higher = better improvement)
-                - **Near zero (-1 to +1)**: Stable condition, minimal change
-                - **Negative values (-5 to 0)**: Patient deteriorated (lower = worse deterioration)
-                - Consider: vital sign changes, symptom relief, adverse events
-                """)
-                
-                with gr.Row():
-                    expert_mode = gr.Radio(
-                        choices=["Automatic Simulation", "Manual Expert Input"],
-                        value="Automatic Simulation",
-                        label="Expert Feedback Mode",
-                        info="Choose how to handle uncertain cases requiring expert labels"
-                    )
-                    expert_queue_size = gr.Number(
-                        label="Pending Expert Reviews",
-                        value=0,
-                        interactive=False
-                    )
-                
-                with gr.Row():
-                    # 显示当前待标注的案例
-                    with gr.Column(scale=2):
-                        current_case_display = gr.JSON(
-                            label="Current Case for Review",
-                            value={}
-                        )
-                    
-                    # 专家输入控制
-                    with gr.Column(scale=1):
-                        expert_reward_slider = gr.Slider(
-                            minimum=-5.0,
-                            maximum=5.0,
-                            value=0.0,
-                            step=0.1,
-                            label="Expert Reward Assessment",
-                            info="Slide to set the clinical outcome value",
-                            interactive=False
-                        )
-                        
-                        reward_interpretation = gr.Textbox(
-                            label="Interpretation",
-                            value="Neutral outcome",
-                            interactive=False
-                        )
-                        
-                        submit_expert_label_btn = gr.Button(
-                            "✅ Submit Expert Label",
-                            variant="primary",
-                            interactive=False
-                        )
-                        
-                        skip_case_btn = gr.Button(
-                            "⏭️ Skip Case",
-                            variant="secondary",
-                            interactive=False
-                        )
-                        refresh_case_btn = gr.Button(
-                            "🔄 Get Next Case",
-                            variant="secondary"
-                        )
-
-
-                with gr.Row():
-                    expert_stats = gr.Textbox(
-                        label="Expert Labeling Statistics",
-                        value="No labels submitted yet",
-                        lines=3,
-                        interactive=False
-                    )
-
-
-                # Uncertainty threshold adjustment 部分
-                gr.Markdown("### Adjust Active Learning Threshold")
-                with gr.Row():
-                    tau_slider = gr.Slider(
-                        minimum=0.01, maximum=0.2, value=0.05, step=0.01,
-                        label="Uncertainty Threshold (τ)",
-                        info="Lower = query more samples, Higher = query fewer samples"
-                    )
-                    update_tau_btn = gr.Button("Update Threshold")
-                
-                tau_update_output = gr.Textbox(label="Update Status", lines=2)
-                
-                # 评估结果部分
-                gr.Markdown("### Evaluation Results")
-                with gr.Row():
-                    evaluation_text = gr.Textbox(
-                        label="Evaluation Report",
-                        lines=20,
-                        max_lines=30,
-                        interactive=False,
-                        visible=False
-                    )
-                    evaluation_plot = gr.Image(label="Performance Metrics", visible=False)
-                
-                # 下载报告按钮
-                with gr.Row():
-                    download_report_btn = gr.Button("📥 Download Report", visible=False)
-                    report_file = gr.File(label="Downloaded Report", visible=False)                
-                
-                # 如何工作说明
-                gr.Markdown("""
-                ### How Online Learning Works
-                
-                1. **Active Learning**: Only uncertain samples are queried for expert labels
-                2. **Incremental Updates**: Models update continuously without full retraining
-                3. **Hot Parameters**: Change α, γ, lr instantly without stopping the system
-                4. **Auto-save**: Models checkpoint every 10 minutes
-                
-                The system is learning in real-time while you use it!
-                """)
-            
-            # Tab 5: Model Info (renumbered from Tab 4)
-            with gr.Tab("📈 Model Information"):
-                gr.Markdown("""
-                ### Current Model Configuration
-                
-                **Model Paths**:
-                - Dynamics Model: `{}`
-                - Outcome Model: `{}`
-                - Q-Network: `{}`
-                
-                **Architecture**:
-                - State Dimension: 10 (patient features)
-                - Action Space: 5 treatments
-                - Dynamics Model: Transformer-based
-                - Outcome Model: Deconfounded reward prediction
-                - Policy: Conservative Q-Learning
-                
-                **Treatment Options**:
-                1. Medication A - Primary glucose control
-                2. Medication B - Blood pressure focus
-                3. Medication C - Balanced approach
-                4. Placebo - No active treatment
-                5. Combination Therapy - Multi-drug approach
-                
-                **Patient Features**:
-                - Age (normalized)
-                - Gender (binary)
-                - Blood Pressure
-                - Heart Rate
-                - Glucose Level
-                - Creatinine
-                - Hemoglobin
-                - Temperature
-                - Oxygen Saturation
-                - BMI
-                """.format(
-                    MODEL_PATHS["dynamics_model"],
-                    MODEL_PATHS["outcome_model"],
-                    MODEL_PATHS["q_network"]
-                ))
-        
         # State variables
         active_patient_id = gr.State(None)
         def create_dataset_stats_image(stats: dict):
@@ -1009,82 +1023,6 @@ def create_gradio_interface():
             plt.close()
             
             return Image.open(buf)
-
-        def _on_change_source(src):
-            if src == "Virtual Data":
-                return gr.update(visible=True), gr.update(visible=False), "Current: Virtual Data"
-            else:
-                return gr.update(visible=False), gr.update(visible=True), "Current: Real Data"
-
-        data_source_radio.change(
-            fn=_on_change_source,
-            inputs=[data_source_radio],
-            outputs=[virtual_data_options, real_data_options, current_source_text]
-        )
-
-        # 2) 生成虚拟数据
-        def _on_generate_virtual(n_pat):
-            stats = data_manager.generate_virtual_data(n_patients=int(n_pat))
-            plist = get_patient_list()
-            img = create_dataset_stats_image(get_cohort_stats())
-
-            # 构建动作图例
-            from drive_tools import get_action_legend_html
-            legend_html = get_action_legend_html()
-            from drive_tools import get_action_legend_html
-            legend_html = get_action_legend_html()
-            return (
-                gr.update(choices=plist, value=(plist[0] if plist else None)),
-                img,
-                gr.update(value=legend_html, visible=bool(legend_html)),
-                f"Loaded {len(plist)} patients from Real Data"
-            )
-
-
-        # 3) 加载真实数据
-        def _on_load_real(data_file, schema_file):
-            # 真正加载：drive_tools.load_data_source 会同步 meta
-            path = data_file.name if data_file else None
-            schema = schema_file.name if schema_file else None
-
-            # 正确的调用方式：明确 source_type="real"
-            res = load_data_source("real", file_path=path, schema_path=schema)
-
-            plist = get_patient_list()
-            patient_choices = plist.get("patients", []) if isinstance(plist, dict) else plist
-
-            img = create_dataset_stats_image(get_cohort_stats())
-            return (
-                gr.update(choices=patient_choices, value=(patient_choices[0] if patient_choices else None)),
-                img,
-                f"Loaded {len(patient_choices)} patients from Real Data"
-            )
-
-        # 4) 刷新患者列表
-        def _on_refresh_patients():
-            plist = get_patient_list()
-            patient_choices = plist.get("patients", []) if isinstance(plist, dict) else plist
-            return gr.update(choices=patient_choices)
-
-        refresh_patients_btn.click(
-            fn=_on_refresh_patients,
-            inputs=[],
-            outputs=[patient_dropdown]
-        )
-
-        # 5) 选择患者 -> 刷新顶部“Active Patient”和左侧基本信息图
-        def _on_select_patient(pid):
-            if not pid:
-                return "No patient selected", None
-            info = get_patient_data(pid)
-            fig = create_patient_visualization(info)
-            return f"Active: {pid}", fig
-
-        patient_dropdown.change(
-            fn=_on_select_patient,
-            inputs=[patient_dropdown],
-            outputs=[active_patient_display, patient_info_display]
-        )
 
         def create_patient_visualization(patient_info):
             """Create visualization for patient information"""
@@ -1410,44 +1348,72 @@ def create_gradio_interface():
 
 
         # Event handlers for Data Management
-        def toggle_data_options(source):
+        def handle_data_source_change(source):
+            default_banner = "👋 **Step 1:** Select a data source above and press the corresponding button to load it."
+
             if source == "Virtual Data":
-                return gr.update(visible=True), gr.update(visible=False)
-            else:
-                return gr.update(visible=False), gr.update(visible=True)
+                return (
+                    gr.update(visible=True),
+                    gr.update(visible=False),
+                    "Virtual demo data selected. Click 'Generate Virtual Data' when you're ready.",
+                    gr.update(value="✅ Step 2: Press **Generate Virtual Data** to build the demo cohort."),
+                )
+            if source == "Real Data":
+                return (
+                    gr.update(visible=False),
+                    gr.update(visible=True),
+                    "Real dataset selected. Upload your files and click 'Load Real Data'.",
+                    gr.update(value="✅ Step 2: Upload your dataset and click **Load Real Data**."),
+                )
+
+            return (
+                gr.update(visible=False),
+                gr.update(visible=False),
+                "No dataset loaded. Choose a source to begin.",
+                gr.update(value=default_banner),
+            )
                 
         def generate_virtual_data(n_patients):
-            from data_manager import data_manager
-            from drive_tools import get_cohort_stats, get_action_legend_html
+            from drive_tools import load_data_source, get_cohort_stats, get_action_legend_html
             try:
-                data_manager.generate_virtual_data(n_patients=int(n_patients))
+                result = load_data_source("virtual", n_patients=int(n_patients))
                 stats = get_cohort_stats()
-                img = create_dataset_stats_image(stats)
+                img = create_dataset_stats_image(stats) if stats else None
                 legend_html = get_action_legend_html()
 
                 lst = get_patient_list()
                 choices = lst.get("patients", []) if isinstance(lst, dict) else lst
+                message = result.get("message") if isinstance(result, dict) else None
+                status_text = message or f"Virtual cohort ready with {len(choices)} patients."
 
-                # 返回顺序必须和 outputs 对齐：
-                # [current_source_text, stats_display, action_legend, patient_dropdown]
+                follow_up = (
+                    "✅ Virtual demo cohort loaded. Browse patients below or open the Online Learning tab when you're ready. "
+                    "Streaming stays paused until you press **Start Online Training**."
+                )
+
                 return (
-                    f"Loaded {len(choices)} patients (virtual)",
+                    status_text,
                     img,
                     gr.update(value=legend_html, visible=bool(legend_html)),
-                    gr.update(choices=choices, value=(choices[0] if choices else None)),
+                    gr.update(
+                        choices=choices,
+                        value=(choices[0] if choices else None),
+                        interactive=bool(choices),
+                    ),
+                    gr.update(value=follow_up),
                 )
             except Exception as e:
-                # 占位图片，防止 UI 崩
                 import matplotlib.pyplot as plt, io
                 from PIL import Image
-                fig, ax = plt.subplots(1,1,figsize=(6,3)); ax.axis("off")
-                ax.text(0.5,0.5,f"Error: {e}",ha="center",va="center"); buf=io.BytesIO()
+                fig, ax = plt.subplots(1, 1, figsize=(6, 3)); ax.axis("off")
+                ax.text(0.5, 0.5, f"Error: {e}", ha="center", va="center"); buf = io.BytesIO()
                 plt.tight_layout(); plt.savefig(buf, format="png", dpi=120, bbox_inches="tight"); buf.seek(0); plt.close(fig)
                 return (
                     f"❌ Generate error: {e}",
                     Image.open(buf),
                     gr.update(value="", visible=False),
-                    gr.update(),  # 下拉不更新
+                    gr.update(choices=[], value=None, interactive=False),
+                    gr.update(value="⚠️ Failed to prepare demo data. Check the logs and try again."),
                 )
 
 
@@ -1455,69 +1421,97 @@ def create_gradio_interface():
             from drive_tools import load_data_source, get_cohort_stats, get_action_legend_html
             try:
                 if file is None:
-                    return "Please upload a data file", None, gr.update(value="", visible=False), gr.update()
+                    return (
+                        "Please upload a data file before loading.",
+                        None,
+                        gr.update(value="", visible=False),
+                        gr.update(choices=[], value=None, interactive=False),
+                        gr.update(value="⚠️ Waiting for a dataset file."),
+                    )
 
                 schema_path = schema_file.name if schema_file else None
                 res = load_data_source("real", file_path=file.name, schema_path=schema_path)
 
                 stats = get_cohort_stats()
-                img = create_dataset_stats_image(stats)
+                img = create_dataset_stats_image(stats) if stats else None
                 legend_html = get_action_legend_html()
 
                 lst = get_patient_list()
                 choices = lst.get("patients", []) if isinstance(lst, dict) else lst
-                msg = f"Loaded {res.get('patients', len(choices))} patients ({res.get('records','?')} records)" if isinstance(res, dict) else "Loaded"
+                msg = (
+                    f"Loaded {res.get('patients', len(choices))} patients ({res.get('records', '?')} records)"
+                    if isinstance(res, dict)
+                    else "Loaded dataset"
+                )
+
+                follow_up = (
+                    "✅ Real dataset loaded. Review the schema preview below and assign patients before launching online learning. "
+                    "Streaming remains paused until **Start Online Training** is pressed."
+                )
 
                 return (
                     msg,
                     img,
                     gr.update(value=legend_html, visible=bool(legend_html)),
-                    gr.update(choices=choices, value=(choices[0] if choices else None)),
+                    gr.update(
+                        choices=choices,
+                        value=(choices[0] if choices else None),
+                        interactive=bool(choices),
+                    ),
+                    gr.update(value=follow_up),
                 )
             except Exception as e:
                 import matplotlib.pyplot as plt, io
                 from PIL import Image
-                fig, ax = plt.subplots(1,1,figsize=(6,3)); ax.axis("off")
-                ax.text(0.5,0.5,f"Error: {e}",ha="center",va="center"); buf=io.BytesIO()
+                fig, ax = plt.subplots(1, 1, figsize=(6, 3)); ax.axis("off")
+                ax.text(0.5, 0.5, f"Error: {e}", ha="center", va="center"); buf = io.BytesIO()
                 plt.tight_layout(); plt.savefig(buf, format="png", dpi=120, bbox_inches="tight"); buf.seek(0); plt.close(fig)
                 return (
                     f"❌ Load error: {e}",
                     Image.open(buf),
                     gr.update(value="", visible=False),
-                    gr.update(),
+                    gr.update(choices=[], value=None, interactive=False),
+                    gr.update(value="⚠️ Unable to load the dataset. Verify the file and schema."),
                 )
 
         
         def refresh_patient_list():
             patients = get_patient_list()
-            if "error" not in patients:
+            if isinstance(patients, dict) and "error" not in patients:
                 patient_choices = patients.get("patients", [])
-                return gr.update(choices=patient_choices, value=patient_choices[0] if patient_choices else None)
-            return gr.update()
+                return gr.update(
+                    choices=patient_choices,
+                    value=patient_choices[0] if patient_choices else None,
+                    interactive=bool(patient_choices),
+                )
+            return gr.update(choices=[], value=None, interactive=False)
         
         def display_patient_info(patient_id):
             if not patient_id:
                 return None, None, "No patient selected"
-            
+
             patient_info = get_patient_data(patient_id)
-            if "error" in patient_info:
-                return None, None, patient_id
-            
+            if not patient_info or "error" in patient_info:
+                warning = patient_info.get("error", "Unable to load patient details") if isinstance(patient_info, dict) else "Unable to load patient details"
+                return None, None, warning
+
             patient_viz = create_patient_visualization(patient_info)
             return patient_viz, None, f"Patient: {patient_id}"
         
         def analyze_patient_fn(patient_id):
             if not patient_id:
                 return None
-            
+
             analysis = analyze_patient(patient_id)
+            if analysis.get("error"):
+                return None
             analysis_viz = create_analysis_visualization(analysis)
             return analysis_viz
-        
+
         def export_patient_fn(patient_id):
             if not patient_id:
                 return None
-            
+
             try:
                 output_path = f"patient_{patient_id}_export.json"
                 data_manager.export_patient_data(patient_id, output_path)
@@ -1681,8 +1675,8 @@ def create_gradio_interface():
             if "error" in result:
                 gr.Warning(f"Error: {result['error']}")
             else:
-                gr.Info("Online training paused")
-        
+                gr.Info(result.get("message", "Online training paused"))
+
         def resume_online_training():
             """Resume online training"""
             from drive_tools import resume_online_training
@@ -1690,7 +1684,7 @@ def create_gradio_interface():
             if "error" in result:
                 gr.Warning(f"Error: {result['error']}")
             else:
-                gr.Info("Online training resumed")
+                gr.Info(result.get("message", "Online training started"))
         
         def update_tau_threshold(new_tau):
             """Update active learning threshold"""
@@ -1773,15 +1767,15 @@ def create_gradio_interface():
         
         # Data Management events
         data_source_radio.change(
-            toggle_data_options,
+            handle_data_source_change,
             inputs=[data_source_radio],
-            outputs=[virtual_data_options, real_data_options]
+            outputs=[virtual_data_options, real_data_options, current_source_text, data_stage_message]
         )
         
         generate_btn.click(
             fn=generate_virtual_data,
             inputs=[n_patients_slider],
-            outputs=[current_source_text, stats_display, action_legend, patient_dropdown]  # ← 顺序固定
+            outputs=[current_source_text, stats_display, action_legend, patient_dropdown, data_stage_message]  # ← 顺序固定
         )
 
 
@@ -1795,7 +1789,7 @@ def create_gradio_interface():
         load_real_btn.click(
             fn=load_real_data,
             inputs=[file_upload, schema_upload],
-            outputs=[current_source_text, stats_display, action_legend, patient_dropdown]  # ← 顺序固定
+            outputs=[current_source_text, stats_display, action_legend, patient_dropdown, data_stage_message]  # ← 顺序固定
         )
 
         
@@ -1927,9 +1921,23 @@ def create_gradio_interface():
                 al_stats_table  # 添加table
             ]
         )
-        
+
         pause_btn.click(pause_online_training)
         resume_btn.click(resume_online_training)
+
+        online_tab.select(
+            refresh_online_stats,
+            outputs=[
+                total_transitions,
+                query_rate,
+                buffer_size,
+                avg_uncertainty,
+                current_tau,
+                training_updates,
+                al_stats_plot,
+                al_stats_table,
+            ]
+        )
         
         def run_custom_evaluation(duration, scenario):
             """运行自定义评估"""
@@ -2259,20 +2267,6 @@ def create_gradio_interface():
             download_evaluation_report,
             outputs=[report_file]
         )        
-        # Auto-refresh stats every 5 seconds when the tab is active
-        demo.load(
-            refresh_online_stats,
-            outputs=[
-                total_transitions,
-                query_rate,
-                buffer_size,
-                avg_uncertainty,
-                current_tau,
-                training_updates,
-                al_stats_plot,
-                al_stats_table
-            ]
-        )
         def update_live_monitoring():
             """更新实时监控指标"""
             try:
@@ -2316,13 +2310,6 @@ def create_gradio_interface():
             except Exception as e:
                 return 0, 0, 0, "Error", 0, f"Error: {str(e)}"
             
-        # Load initial data on startup
-        demo.load(
-            generate_virtual_data,
-            inputs=[n_patients_slider],
-            outputs=[current_source_text, stats_display, action_legend, patient_dropdown]
-        )
-    
     return demo
 
 

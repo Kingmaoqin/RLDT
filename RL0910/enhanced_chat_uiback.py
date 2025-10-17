@@ -584,32 +584,35 @@ def create_gradio_interface():
             # Tab 4: Online Learning Monitor
             with gr.Tab("📊 Online Learning Monitor"):
                 gr.Markdown("### Real-time Training Statistics")
-                
+                gr.Markdown(
+                    "> ℹ️ The online trainer stays paused after launch. Press **Start Online Training** when you are ready to stream new data."
+                )
+
                 # 按钮行
                 with gr.Row():
                     refresh_stats_btn = gr.Button("🔄 Refresh Stats", variant="primary")
                     pause_btn = gr.Button("⏸️ Pause Training")
-                    resume_btn = gr.Button("▶️ Resume Training")
-                    evaluate_btn = gr.Button("📊 Run Evaluation", variant="secondary") # 添加这个
-                
+                    resume_btn = gr.Button("▶️ Start Online Training")
+                    evaluate_btn = gr.Button("📊 Run Evaluation", variant="secondary")  # 添加这个
+
                 # 统计数据显示和 Active Learning Statistics JSON 显示在同一行，分成两列
                 with gr.Row():
-                    with gr.Column(scale=1): # 左侧的统计数字列
+                    with gr.Column(scale=1):  # 左侧的统计数字列
                         total_transitions = gr.Number(label="Total Transitions Seen", value=0)
                         query_rate = gr.Number(label="Query Rate (%)", value=0)
                         buffer_size = gr.Number(label="Labeled Buffer Size", value=0)
-                        
+
                         avg_uncertainty = gr.Number(label="Average Uncertainty", value=0)
                         current_tau = gr.Number(label="Current Threshold (τ)", value=0.05)
                         training_updates = gr.Number(label="Total Updates", value=0)
-                    
-                    with gr.Column(scale=2): # 右侧的 Active Learning Statistics 显示列
+
+                    with gr.Column(scale=2):  # 右侧的 Active Learning Statistics 显示列
                         # 使用图表替代JSON
                         al_stats_plot = gr.Plot(label="Active Learning Statistics")
                         al_stats_table = gr.Dataframe(
                             headers=["Metric", "Value"],
                             label="Statistics Summary",
-                            interactive=False
+                            interactive=False,
                         )
 
                 gr.Markdown("### ⚙️ Evaluation Settings")
@@ -1395,8 +1398,8 @@ def create_gradio_interface():
             if "error" in result:
                 gr.Warning(f"Error: {result['error']}")
             else:
-                gr.Info("Online training paused")
-        
+                gr.Info(result.get("message", "Online training paused"))
+
         def resume_online_training():
             """Resume online training"""
             from drive_tools import resume_online_training
@@ -1404,7 +1407,7 @@ def create_gradio_interface():
             if "error" in result:
                 gr.Warning(f"Error: {result['error']}")
             else:
-                gr.Info("Online training resumed")
+                gr.Info(result.get("message", "Online training started"))
         
         def update_tau_threshold(new_tau):
             """Update active learning threshold"""
