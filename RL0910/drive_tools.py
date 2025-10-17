@@ -1374,6 +1374,240 @@ def retrain_model(training_params: dict) -> dict:
         return {"error": str(e)}
 
 
+def quick_train_on_current_data(max_epochs: int = 5,
+                               gamma: float = 0.99,
+                               batch_size: int = 256) -> Dict[str, Any]:
+    """Run a lightweight training routine on the currently loaded dataset."""
+
+    from data_manager import data_manager
+
+    start_time = time.time()
+
+    try:
+        df = data_manager.get_current_data()
+    except Exception as exc:
+        return {"error": f"No active dataset: {exc}"}
+
+    if df is None or len(df) == 0:
+        return {"error": "Dataset is empty. Load data before training."}
+
+    meta = data_manager.get_current_meta() or {}
+
+    feature_cols = meta.get("feature_columns") or [
+        c for c in df.columns if str(c).startswith("state_") and not str(c).startswith("next_state_")
+    ]
+
+    if not feature_cols:
+        return {"error": "Could not identify feature columns (state_*)."}
+
+    sort_keys = []
+    if "patient_id" in df.columns:
+        sort_keys.append("patient_id")
+    if "timestep" in df.columns:
+        sort_keys.append("timestep")
+
+    if sort_keys:
+        df_sorted = df.sort_values(sort_keys).reset_index(drop=True)
+    else:
+        df_sorted = df.reset_index(drop=True)
+
+    if "patient_id" in df_sorted.columns:
+        traj_codes, unique_patients = df_sorted["patient_id"].factorize(sort=False)
+    else:
+        traj_codes = np.arange(len(df_sorted))
+        unique_patients = [f"P{i:05d}" for i in range(len(df_sorted))]
+        df_sorted = df_sorted.copy()
+        df_sorted["patient_id"] = unique_patients
+
+    if "timestep" not in df_sorted.columns:
+        df_sorted = df_sorted.copy()
+        df_sorted["timestep"] = df_sorted.groupby("patient_id").cumcount()
+
+    reward_series = df_sorted.get("reward")
+    if reward_series is None:
+        return {"error": "Dataset must include a reward column."}
+
+    rewards_np = reward_series.astype(np.float32).to_numpy(dtype=np.float32, copy=True)
+
+    # Prepare action encoding
+    raw_action_series = df_sorted.get("action")
+    if raw_action_series is None:
+        return {"error": "Dataset must include an action column."}
+
+    raw_action_values = raw_action_series.to_numpy()
+    unique_raw_actions = pd.unique(raw_action_series)
+
+    # Build mapping from raw action values to contiguous indices
+    raw_to_index: Dict[Any, int] = {val: idx for idx, val in enumerate(unique_raw_actions)}
+    actions_encoded = np.array([raw_to_index[val] for val in raw_action_values], dtype=np.int64)
+
+    meta_action_map = meta.get("action_map") or {}
+
+    def _resolve_action_name(raw_val: Any) -> str:
+        for key in (raw_val, str(raw_val)):
+            if key in meta_action_map:
+                return str(meta_action_map[key])
+            try:
+                ikey = int(key)
+            except Exception:
+                continue
+            if ikey in meta_action_map:
+                return str(meta_action_map[ikey])
+        return str(raw_val)
+
+    action_names = [_resolve_action_name(val) for val in unique_raw_actions]
+    action_map = {idx: name for idx, name in enumerate(action_names)}
+
+    state_matrix = df_sorted[feature_cols].astype(float).to_numpy(dtype=np.float32)
+    state_dim = state_matrix.shape[1]
+    action_dim = len(action_map)
+
+    # Compute next states and terminal flags per trajectory
+    next_state_matrix = np.zeros_like(state_matrix, dtype=np.float32)
+    terminals = np.zeros(len(df_sorted), dtype=np.float32)
+
+    for patient_code in np.unique(traj_codes):
+        idxs = np.where(traj_codes == patient_code)[0]
+        next_state_matrix[idxs[:-1]] = state_matrix[idxs[1:]]
+        next_state_matrix[idxs[-1]] = state_matrix[idxs[-1]]
+        terminals[idxs[-1]] = 1.0
+
+    if "terminal" in df_sorted.columns:
+        try:
+            terminals = df_sorted["terminal"].astype(float).to_numpy()
+        except Exception:
+            pass
+
+    # Compute Monte-Carlo returns for supervised Q fitting
+    returns = np.zeros(len(df_sorted), dtype=np.float32)
+    for patient_code in np.unique(traj_codes):
+        idxs = np.where(traj_codes == patient_code)[0]
+        running = 0.0
+        for i in reversed(idxs):
+            running = rewards_np[i] + gamma * running * (1.0 - terminals[i])
+            returns[i] = running
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    dynamics_model = TransformerDynamicsModel(state_dim, action_dim).to(device)
+    outcome_model = TreatmentOutcomeModel(state_dim, action_dim).to(device)
+    q_network = ConservativeQNetwork(state_dim, action_dim).to(device)
+
+    idx_array = np.arange(len(df_sorted))
+    np.random.shuffle(idx_array)
+
+    batch_size = max(32, min(batch_size, len(df_sorted)))
+
+    states_tensor = torch.from_numpy(state_matrix).to(device).float()
+    next_states_tensor = torch.from_numpy(next_state_matrix).to(device).float()
+    actions_tensor = torch.from_numpy(actions_encoded).to(device)
+    rewards_tensor = torch.from_numpy(rewards_np).to(device).float()
+    returns_tensor = torch.from_numpy(returns).to(device).float()
+
+    # Dynamics model: predict next state given current state/action
+    dynamics_model.train()
+    opt_dyn = torch.optim.Adam(dynamics_model.parameters(), lr=1e-3)
+    for epoch in range(max_epochs):
+        perm = np.random.permutation(idx_array)
+        for start in range(0, len(perm), batch_size):
+            batch_idx = perm[start:start + batch_size]
+            s_batch = states_tensor[batch_idx].unsqueeze(1)
+            a_batch = actions_tensor[batch_idx].unsqueeze(1)
+            target = next_states_tensor[batch_idx]
+
+            pred = dynamics_model(s_batch, a_batch).squeeze(1)
+            loss = F.mse_loss(pred, target)
+
+            opt_dyn.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(dynamics_model.parameters(), 5.0)
+            opt_dyn.step()
+
+    dynamics_model.eval()
+
+    # Outcome model: supervised regression on immediate reward
+    outcome_model.train()
+    opt_out = torch.optim.Adam(outcome_model.parameters(), lr=1e-3)
+    for epoch in range(max_epochs):
+        perm = np.random.permutation(idx_array)
+        for start in range(0, len(perm), batch_size):
+            batch_idx = perm[start:start + batch_size]
+            s_batch = states_tensor[batch_idx]
+            a_batch = actions_tensor[batch_idx]
+            target = rewards_tensor[batch_idx]
+
+            pred = outcome_model(s_batch, a_batch).squeeze(-1)
+            loss = F.mse_loss(pred, target)
+
+            opt_out.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(outcome_model.parameters(), 5.0)
+            opt_out.step()
+
+    outcome_model.eval()
+
+    # Q-network: fit to Monte Carlo returns
+    q_network.train()
+    opt_q = torch.optim.Adam(q_network.parameters(), lr=3e-4)
+    for epoch in range(max_epochs * 2):
+        perm = np.random.permutation(idx_array)
+        for start in range(0, len(perm), batch_size):
+            batch_idx = perm[start:start + batch_size]
+            s_batch = states_tensor[batch_idx]
+            a_batch = actions_tensor[batch_idx]
+            target = returns_tensor[batch_idx]
+
+            q_values = q_network(s_batch)
+            chosen = q_values.gather(1, a_batch.unsqueeze(1)).squeeze(1)
+            loss = F.mse_loss(chosen, target)
+
+            opt_q.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(q_network.parameters(), 5.0)
+            opt_q.step()
+
+    q_network.eval()
+
+    # Update inference stack with freshly trained models
+    inference_engine = DigitalTwinInference(
+        dynamics_model.cpu(),
+        outcome_model.cpu(),
+        q_network.cpu(),
+        state_dim,
+        action_dim,
+        device="cpu",
+    )
+
+    inference_engine.action_names = [action_map[i] for i in range(action_dim)]
+    inference_engine.feature_names = feature_cols
+    inference_engine.meta = {
+        **meta,
+        "feature_columns": feature_cols,
+        "action_names": [action_map[i] for i in range(action_dim)],
+        "action_map": action_map,
+    }
+
+    cds = ClinicalDecisionSupport(inference_engine)
+    initialize_tools(inference_engine, cds)
+
+    meta.update({
+        "feature_columns": feature_cols,
+        "action_names": inference_engine.action_names,
+        "action_map": action_map,
+    })
+    CURRENT_META.update(meta)
+
+    duration = time.time() - start_time
+
+    return {
+        "status": "success",
+        "message": "Quick baseline training completed.",
+        "training_time": duration,
+        "state_dim": state_dim,
+        "action_dim": action_dim,
+        "samples": int(len(df_sorted)),
+    }
+
 def get_training_status(job_id: str) -> dict:
     """Get status of a training job"""
     if job_id not in _training_status:

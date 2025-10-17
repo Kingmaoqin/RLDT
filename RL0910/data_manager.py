@@ -9,14 +9,15 @@ import os
 os.environ.setdefault("PANDAS_USE_PYARROW_EXTENSION_ARRAY", "0")
 os.environ.setdefault("PANDAS_USE_PYARROW_BACKEND", "0")
 
-import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 from data import PatientDataGenerator
 import json
 from adapters import TabularAdapter, SensorAdapter
 from schema import SchemaSpec
-from typing import Tuple
+from pandas_compat import get_pandas
+
+pd = get_pandas()
 
 
 class DataManager:
@@ -141,8 +142,7 @@ class DataManager:
         if schema_yaml:
             spec = SchemaSpec.from_yaml_text(schema_yaml)
         elif schema_path:
-            with open(schema_path, "r", encoding="utf-8") as f:
-                spec = SchemaSpec.from_yaml_text(f.read())
+            spec = SchemaSpec.from_yaml_file(schema_path)
         else:
             raise ValueError("真实数据需要提供 schema_path 或 schema_yaml 才能映射到统一结构")
 
@@ -169,15 +169,40 @@ class DataManager:
 
         feat_names = list(meta.get("feature_names") or meta.get("feature_columns") or [])
         X = ds["states"]
+        feature_columns: List[str] = []
         for i, name in enumerate(feat_names):
             safe = str(name).strip().replace(" ", "_").lower()
-            df[f"state_{safe}"] = X[:, i].astype(float)
+            col_name = f"state_{safe}"
+            df[col_name] = X[:, i].astype(float)
+            feature_columns.append(col_name)
+
+        if feature_columns:
+            df[feature_columns] = (
+                df[feature_columns]
+                .apply(pd.to_numeric, errors="coerce")
+                .astype(np.float32)
+            )
 
         # 4) 落地到管理器
         self.real_data = df
         self.current_source = "real"
         self.real_data_path = file_path
+        meta = dict(meta)
+        meta.setdefault("feature_columns", feature_columns)
+        meta.setdefault("feature_names", feat_names)
+        meta.setdefault("schema_source", schema_path or "inline")
+        meta.setdefault("data_type", getattr(spec, "data_type", "tabular"))
+        meta.setdefault("reward_spec", getattr(spec, "reward_spec", None))
+        meta.setdefault("normalization", getattr(spec, "normalization", None))
+
+        # 记录特征 dtype 以便诊断
+        if feature_columns:
+            meta["feature_dtypes"] = {
+                name: str(df[name].dtype) for name in feature_columns
+            }
+
         self.current_meta = meta  # <— 供 UI/推理使用
+        self.current_schema = spec
 
         print(f"[DataManager] Real data (schema) loaded: {len(df)} rows, "
             f"{df['patient_id'].nunique()} patients, {len(feat_names)} features.")

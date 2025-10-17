@@ -91,6 +91,65 @@ CURRENT_PARAMS = {
     "n_epochs": 50
 }
 
+# Styling helpers for a cleaner layout
+CUSTOM_CSS = """
+.gradio-container {
+    background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
+}
+.data-stage-banner {
+    background: #eef2ff;
+    border-left: 4px solid #6366f1;
+    padding: 12px 16px;
+    border-radius: 10px;
+    font-size: 0.95rem;
+    box-shadow: 0 10px 30px rgba(99, 102, 241, 0.08);
+}
+.section-card {
+    background: rgba(255, 255, 255, 0.92);
+    border-radius: 14px;
+    padding: 18px;
+    box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
+    backdrop-filter: blur(6px);
+    margin-bottom: 18px;
+}
+"""
+
+DATA_STAGE_DEFAULT = (
+    "### 🧭 Workflow Guide\n"
+    "1. **Select** a data source above.\n"
+    "2. **Load** the dataset with the corresponding action button.\n"
+    "3. *(Optional)* Run **Quick Baseline Training** to adapt the models.\n"
+    "4. Explore patients and request reports below."
+)
+
+DATA_STAGE_READY = (
+    "### ✅ Dataset Ready\n"
+    "- Run **Quick Baseline Training** to align the models with this cohort.\n"
+    "- The patient explorer unlocks right after loading completes."
+)
+
+DATA_STAGE_TRAINED = (
+    "### 🩺 Model Calibrated\n"
+    "- The recommendation engine now reflects the uploaded dataset.\n"
+    "- Continue exploring patients or open the Online Learning tab for live adaptation."
+)
+
+TRAINING_PROMPT = (
+    "ℹ️ **Tip:** Quick Baseline Training updates the dynamics, outcome, and policy models to match the current dataset."
+)
+
+DATA_STAGE_PROMPT_VIRTUAL = (
+    "### ▶️ Ready to Generate\n"
+    "- Press **Generate Virtual Data** to create a demo cohort.\n"
+    "- The patient explorer unlocks after the cohort is generated."
+)
+
+DATA_STAGE_PROMPT_REAL = (
+    "### 📁 Ready to Load\n"
+    "- Upload your dataset (and optional schema) then press **Load Real Data**.\n"
+    "- Downstream panels remain hidden until loading finishes."
+)
+
 # Demo patient state
 DEMO_PATIENT = {
     "age": 55,
@@ -104,6 +163,26 @@ DEMO_PATIENT = {
     "oxygen_saturation": 0.88,
     "bmi": 0.55
 }
+
+
+def _get_data_preview(limit: int = 10, max_columns: int = 12):
+    """Return a small preview of the active dataset for the UI."""
+    try:
+        df = data_manager.get_current_data()
+    except Exception:
+        return None
+
+    if df is None or df.empty:
+        return None
+
+    preview = df.head(limit).reset_index(drop=True)
+    if preview.shape[1] > max_columns:
+        preview = preview.iloc[:, :max_columns]
+
+    preview = preview.copy()
+    preview.columns = [str(col) for col in preview.columns]
+    preview = preview.astype(object).where(preview.notna(), None)
+    return preview
 
 
 def load_models_and_initialize():
@@ -391,7 +470,11 @@ def create_gradio_interface():
     )    
     data_stage_message = None
 
-    with gr.Blocks(title="Real-time Interactive Clinical Navigator", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(
+        title="Real-time Interactive Clinical Navigator",
+        theme=gr.themes.Soft(primary_hue="indigo", secondary_hue="blue", neutral_hue="slate"),
+        css=CUSTOM_CSS,
+    ) as demo:
         gr.Markdown("""
         # 🏥 Real-time Interactive Clinical Navigator
 
@@ -451,33 +534,50 @@ def create_gradio_interface():
 
 
                         data_stage_message = gr.Markdown(
-                            "👋 **Step 1:** Select a data source above and press the corresponding button to load it.",
+                            DATA_STAGE_DEFAULT,
                             elem_classes=["data-stage-banner"]
                         )
 
-                        # Data statistics
-                        gr.Markdown("### Dataset Overview")
-                        stats_display = gr.Image(label="Dataset Statistics", interactive=False, value=None)
-                        action_legend = gr.HTML(label="Action Legend", visible=False)
+                        with gr.Column(visible=False, elem_classes=["section-card"]) as dataset_overview_section:
+                            gr.Markdown("### Dataset Overview")
+                            with gr.Row():
+                                stats_display = gr.Image(
+                                    label="Dataset Statistics",
+                                    interactive=False,
+                                    value=None,
+                                    visible=False,
+                                )
+                                action_legend = gr.HTML(label="Action Legend", visible=False)
 
-                        # Patient selection
-                        gr.Markdown("### Patient Selection")
-                        with gr.Row():
-                            patient_dropdown = gr.Dropdown(
-                                label="Select Patient",
-                                choices=[],
-                                value=None,
-                                interactive=False
-                            )
-                            refresh_patients_btn = gr.Button("🔄 Refresh List")
+                            with gr.Accordion("Preview first 10 rows", open=False) as preview_panel:
+                                data_preview_table = gr.Dataframe(
+                                    headers=None,
+                                    label="Data Preview",
+                                    interactive=False,
+                                    visible=False,
+                                )
 
-                        # Patient details
-                        with gr.Row():
-                            patient_info_display = gr.Plot(label="Patient Information")
-                            generate_report_btn = gr.Button("🧾 Generate Patient Report", variant="primary")
-                            patient_report_html = gr.HTML(visible=True)
-                            patient_analysis_display = gr.Image(label="Treatment Analysis", visible=False)
-                            report_download = gr.File(label="Report (HTML)", visible=False)
+                            with gr.Row():
+                                quick_train_btn = gr.Button("🚀 Train Quick Baseline", variant="primary", visible=False)
+                                training_status = gr.Markdown(visible=False)
+
+                        with gr.Column(visible=False, elem_classes=["section-card"]) as patient_section:
+                            gr.Markdown("### Patient Explorer")
+                            with gr.Row():
+                                patient_dropdown = gr.Dropdown(
+                                    label="Select Patient",
+                                    choices=[],
+                                    value=None,
+                                    interactive=False
+                                )
+                                refresh_patients_btn = gr.Button("🔄 Refresh List")
+
+                            with gr.Row():
+                                patient_info_display = gr.Plot(label="Patient Information")
+                                generate_report_btn = gr.Button("🧾 Generate Patient Report", variant="primary")
+                                patient_report_html = gr.HTML(visible=True)
+                                patient_analysis_display = gr.Image(label="Treatment Analysis", visible=False)
+                                report_download = gr.File(label="Report (HTML)", visible=False)
 
                             def _on_generate_report(pid):
                                 try:
@@ -1353,34 +1453,49 @@ def create_gradio_interface():
 
         # Event handlers for Data Management
         def handle_data_source_change(source):
-            default_banner = "👋 **Step 1:** Select a data source above and press the corresponding button to load it."
+            base_reset = (
+                gr.update(visible=False),  # dataset_overview_section
+                gr.update(value=None, visible=False),  # stats_display
+                gr.update(value="", visible=False),  # action_legend
+                gr.update(value=None, visible=False),  # data_preview_table
+                gr.update(visible=False, interactive=False),  # quick_train_btn
+                gr.update(value="", visible=False),  # training_status
+                gr.update(visible=False),  # patient_section
+                gr.update(choices=[], value=None, interactive=False),  # patient_dropdown
+            )
 
             if source == "Virtual Data":
                 return (
-                    gr.update(visible=True),
-                    gr.update(visible=False),
+                    gr.update(visible=True),  # virtual options
+                    gr.update(visible=False),  # real options
                     "Virtual demo data selected. Click 'Generate Virtual Data' when you're ready.",
-                    gr.update(value="✅ Step 2: Press **Generate Virtual Data** to build the demo cohort."),
+                    *base_reset,
+                    gr.update(value=DATA_STAGE_PROMPT_VIRTUAL),
                 )
+
             if source == "Real Data":
                 return (
                     gr.update(visible=False),
                     gr.update(visible=True),
                     "Real dataset selected. Upload your files and click 'Load Real Data'.",
-                    gr.update(value="✅ Step 2: Upload your dataset and click **Load Real Data**."),
+                    *base_reset,
+                    gr.update(value=DATA_STAGE_PROMPT_REAL),
                 )
 
             return (
                 gr.update(visible=False),
                 gr.update(visible=False),
                 "No dataset loaded. Choose a source to begin.",
-                gr.update(value=default_banner),
+                *base_reset,
+                gr.update(value=DATA_STAGE_DEFAULT),
             )
                 
         def generate_virtual_data(n_patients):
             from drive_tools import load_data_source, get_cohort_stats, get_action_legend_html
             try:
                 result = load_data_source("virtual", n_patients=int(n_patients))
+                if isinstance(result, dict) and result.get("error"):
+                    raise ValueError(result["error"])
                 stats = get_cohort_stats()
                 img = create_dataset_stats_image(stats) if stats else None
                 legend_html = get_action_legend_html()
@@ -1390,34 +1505,45 @@ def create_gradio_interface():
                 message = result.get("message") if isinstance(result, dict) else None
                 status_text = message or f"Virtual cohort ready with {len(choices)} patients."
 
-                follow_up = (
-                    "✅ Virtual demo cohort loaded. Browse patients below or open the Online Learning tab when you're ready. "
-                    "Streaming stays paused until you press **Start Online Training**."
+                meta = data_manager.get_current_meta()
+                feature_count = len(meta.get("feature_columns") or [])
+                preview = _get_data_preview()
+
+                training_message = (
+                    f"{TRAINING_PROMPT}\n"
+                    f"- Patients detected: **{len(choices)}**\n"
+                    f"- Feature columns: **{feature_count}**"
                 )
 
                 return (
                     status_text,
-                    img,
+                    gr.update(visible=True),
+                    gr.update(value=img, visible=img is not None),
                     gr.update(value=legend_html, visible=bool(legend_html)),
+                    gr.update(value=preview, visible=preview is not None),
+                    gr.update(visible=True, interactive=True),
+                    gr.update(value=training_message, visible=True),
+                    gr.update(visible=True),
                     gr.update(
                         choices=choices,
                         value=(choices[0] if choices else None),
                         interactive=bool(choices),
                     ),
-                    gr.update(value=follow_up),
+                    gr.update(value=DATA_STAGE_READY),
                 )
             except Exception as e:
-                import matplotlib.pyplot as plt, io
-                from PIL import Image
-                fig, ax = plt.subplots(1, 1, figsize=(6, 3)); ax.axis("off")
-                ax.text(0.5, 0.5, f"Error: {e}", ha="center", va="center"); buf = io.BytesIO()
-                plt.tight_layout(); plt.savefig(buf, format="png", dpi=120, bbox_inches="tight"); buf.seek(0); plt.close(fig)
+                error_message = f"❌ Generate error: {e}"
                 return (
-                    f"❌ Generate error: {e}",
-                    Image.open(buf),
+                    error_message,
+                    gr.update(visible=False),
+                    gr.update(value=None, visible=False),
                     gr.update(value="", visible=False),
+                    gr.update(value=None, visible=False),
+                    gr.update(visible=False, interactive=False),
+                    gr.update(value=error_message, visible=True),
+                    gr.update(visible=False),
                     gr.update(choices=[], value=None, interactive=False),
-                    gr.update(value="⚠️ Failed to prepare demo data. Check the logs and try again."),
+                    gr.update(value=DATA_STAGE_DEFAULT),
                 )
 
 
@@ -1425,16 +1551,24 @@ def create_gradio_interface():
             from drive_tools import load_data_source, get_cohort_stats, get_action_legend_html
             try:
                 if file is None:
+                    warning = "⚠️ Please upload a data file before loading."
                     return (
-                        "Please upload a data file before loading.",
-                        None,
+                        warning,
+                        gr.update(visible=False),
+                        gr.update(value=None, visible=False),
                         gr.update(value="", visible=False),
+                        gr.update(value=None, visible=False),
+                        gr.update(visible=False, interactive=False),
+                        gr.update(value=warning, visible=True),
+                        gr.update(visible=False),
                         gr.update(choices=[], value=None, interactive=False),
-                        gr.update(value="⚠️ Waiting for a dataset file."),
+                        gr.update(value=DATA_STAGE_DEFAULT),
                     )
 
                 schema_path = schema_file.name if schema_file else None
                 res = load_data_source("real", file_path=file.name, schema_path=schema_path)
+                if isinstance(res, dict) and res.get("error"):
+                    raise ValueError(res["error"])
 
                 stats = get_cohort_stats()
                 img = create_dataset_stats_image(stats) if stats else None
@@ -1448,37 +1582,86 @@ def create_gradio_interface():
                     else "Loaded dataset"
                 )
 
-                follow_up = (
-                    "✅ Real dataset loaded. Review the schema preview below and assign patients before launching online learning. "
-                    "Streaming remains paused until **Start Online Training** is pressed."
+                meta = data_manager.get_current_meta()
+                feature_count = len(meta.get("feature_columns") or [])
+                preview = _get_data_preview()
+
+                training_message = (
+                    f"{TRAINING_PROMPT}\n"
+                    f"- Patients detected: **{len(choices)}**\n"
+                    f"- Feature columns: **{feature_count}**"
                 )
 
                 return (
                     msg,
-                    img,
+                    gr.update(visible=True),
+                    gr.update(value=img, visible=img is not None),
                     gr.update(value=legend_html, visible=bool(legend_html)),
+                    gr.update(value=preview, visible=preview is not None),
+                    gr.update(visible=True, interactive=True),
+                    gr.update(value=training_message, visible=True),
+                    gr.update(visible=True),
                     gr.update(
                         choices=choices,
                         value=(choices[0] if choices else None),
                         interactive=bool(choices),
                     ),
-                    gr.update(value=follow_up),
+                    gr.update(value=DATA_STAGE_READY),
                 )
             except Exception as e:
-                import matplotlib.pyplot as plt, io
-                from PIL import Image
-                fig, ax = plt.subplots(1, 1, figsize=(6, 3)); ax.axis("off")
-                ax.text(0.5, 0.5, f"Error: {e}", ha="center", va="center"); buf = io.BytesIO()
-                plt.tight_layout(); plt.savefig(buf, format="png", dpi=120, bbox_inches="tight"); buf.seek(0); plt.close(fig)
+                error_message = f"❌ Load error: {e}"
                 return (
-                    f"❌ Load error: {e}",
-                    Image.open(buf),
+                    error_message,
+                    gr.update(visible=False),
+                    gr.update(value=None, visible=False),
                     gr.update(value="", visible=False),
+                    gr.update(value=None, visible=False),
+                    gr.update(visible=False, interactive=False),
+                    gr.update(value=error_message, visible=True),
+                    gr.update(visible=False),
                     gr.update(choices=[], value=None, interactive=False),
-                    gr.update(value="⚠️ Unable to load the dataset. Verify the file and schema."),
+                    gr.update(value=DATA_STAGE_DEFAULT),
                 )
 
-        
+
+        def run_quick_training():
+            from drive_tools import quick_train_on_current_data
+
+            try:
+                result = quick_train_on_current_data()
+            except Exception as exc:
+                result = {"error": str(exc)}
+
+            if "error" in result:
+                message = f"❌ Quick training failed: {result['error']}"
+                return (
+                    gr.update(value=message, visible=True),
+                    gr.update(value=DATA_STAGE_READY),
+                )
+
+            samples = result.get("samples", 0)
+            state_dim = result.get("state_dim", "?")
+            action_dim = result.get("action_dim", "?")
+            duration = result.get("training_time")
+
+            summary = (
+                "### ✅ Quick Baseline Complete\n"
+                f"- Samples used: **{samples}**\n"
+                f"- State dimension: **{state_dim}**\n"
+                f"- Action dimension: **{action_dim}**"
+            )
+
+            if isinstance(duration, (int, float)):
+                summary += f"\n- Duration: **{duration:.1f}s**"
+
+            summary += "\n\nThe recommendation engine now reflects this dataset."
+
+            return (
+                gr.update(value=summary, visible=True),
+                gr.update(value=DATA_STAGE_TRAINED),
+            )
+
+
         def refresh_patient_list():
             patients = get_patient_list()
             if isinstance(patients, dict) and "error" not in patients:
@@ -1773,13 +1956,37 @@ def create_gradio_interface():
         data_source_radio.change(
             handle_data_source_change,
             inputs=[data_source_radio],
-            outputs=[virtual_data_options, real_data_options, current_source_text, data_stage_message]
+            outputs=[
+                virtual_data_options,
+                real_data_options,
+                current_source_text,
+                dataset_overview_section,
+                stats_display,
+                action_legend,
+                data_preview_table,
+                quick_train_btn,
+                training_status,
+                patient_section,
+                patient_dropdown,
+                data_stage_message,
+            ]
         )
-        
+
         generate_btn.click(
             fn=generate_virtual_data,
             inputs=[n_patients_slider],
-            outputs=[current_source_text, stats_display, action_legend, patient_dropdown, data_stage_message]  # ← 顺序固定
+            outputs=[
+                current_source_text,
+                dataset_overview_section,
+                stats_display,
+                action_legend,
+                data_preview_table,
+                quick_train_btn,
+                training_status,
+                patient_section,
+                patient_dropdown,
+                data_stage_message,
+            ]
         )
 
 
@@ -1793,7 +2000,24 @@ def create_gradio_interface():
         load_real_btn.click(
             fn=load_real_data,
             inputs=[file_upload, schema_upload],
-            outputs=[current_source_text, stats_display, action_legend, patient_dropdown, data_stage_message]  # ← 顺序固定
+            outputs=[
+                current_source_text,
+                dataset_overview_section,
+                stats_display,
+                action_legend,
+                data_preview_table,
+                quick_train_btn,
+                training_status,
+                patient_section,
+                patient_dropdown,
+                data_stage_message,
+            ]
+        )
+
+        quick_train_btn.click(
+            run_quick_training,
+            outputs=[training_status, data_stage_message],
+            show_progress=True,
         )
 
         
