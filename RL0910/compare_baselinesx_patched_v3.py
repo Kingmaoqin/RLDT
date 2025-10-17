@@ -13,7 +13,8 @@ Other logic (dataset, simulator, d3rlpy builders) kept from v2.
 import os, sys, json, argparse, inspect
 from typing import Dict, List
 import numpy as np
-import pandas as pd
+from pandas_compat import get_pandas
+pd = get_pandas()
 import torch
 import matplotlib.pyplot as plt
 import torch.nn as nn

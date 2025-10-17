@@ -185,7 +185,6 @@ class DataManager:
 
     def load_real_data_schema_less(self, file_path: str) -> "pd.DataFrame":
 
-        import pandas as pd
         df = pd.read_csv(file_path)
 
         # 1) patient_id

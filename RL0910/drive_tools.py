@@ -22,7 +22,8 @@ import torch.nn.functional as F
 import time
 from collections import deque
 from functools import wraps
-import pandas as pd
+from pandas_compat import get_pandas
+pd = get_pandas()
 from PIL import Image
 
 # Import existing classes
@@ -335,10 +336,35 @@ def initialize_tools(inference_engine: DigitalTwinInference, cds: ClinicalDecisi
     globals()['get_next_expert_case'] = get_next_expert_case
     globals()['submit_expert_label'] = submit_expert_label
     globals()['get_expert_stats'] = get_expert_stats    
-    print("Online training system initialized (stream paused)")
-    print("Use resume_online_training() from the UI to start streaming when ready.")
-    print(f"Stream rate: {CURRENT_HYPERPARAMS['stream_rate']} transitions/sec")
-    print(f"Initial tau: {CURRENT_HYPERPARAMS['tau']}")
+    print("Use the Online Learning Monitor tab to start streaming when you're ready.")
+    print(f"Default stream rate: {CURRENT_HYPERPARAMS['stream_rate']} transitions/sec")
+    print(f"Default tau: {CURRENT_HYPERPARAMS['tau']}")
+
+
+def _ensure_online_system() -> bool:
+    """Instantiate the online training system on demand."""
+    global _online_system, _pending_online_models
+
+    if _online_system is not None:
+        return True
+
+    if not _pending_online_models:
+        print("[WARN] Online models not staged; call initialize_tools first.")
+        return False
+
+    try:
+        _online_system = create_online_training_system(
+            _pending_online_models,
+            sampler_type='hybrid',
+            tau=CURRENT_HYPERPARAMS['tau'],
+            stream_rate=CURRENT_HYPERPARAMS['stream_rate']
+        )
+        print("Online training system prepared (stream paused). Press Start Online Training in the UI to begin streaming.")
+        return True
+    except Exception as exc:
+        print(f"[ERROR] Failed to create online system: {exc}")
+        _online_system = None
+        return False
 
 
 def update_hyperparams(params: Dict) -> Dict:
@@ -937,7 +963,7 @@ def pause_online_training() -> Dict:
 #     return {"error": "Online system not initialized"}
 def resume_online_training(silent: bool = True) -> dict:
     """Resume or start the online training data stream"""
-    if not _online_system or 'stream' not in _online_system:
+    if not _ensure_online_system() or 'stream' not in _online_system:
         return {"error": "Online system not initialized"}
 
     stream = _online_system['stream']
@@ -1618,7 +1644,6 @@ def get_cohort_stats() -> dict:
     }
     """
     import numpy as np
-    import pandas as pd
     from data_manager import data_manager
 
     try:

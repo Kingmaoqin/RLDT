@@ -10,7 +10,8 @@ This module provides complete evaluation functionality including:
 import json
 import torch
 import numpy as np
-import pandas as pd
+from pandas_compat import get_pandas
+pd = get_pandas()
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Dict, List, Tuple, Optional, Any

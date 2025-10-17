@@ -16,6 +16,7 @@ import sys
 import os
 from datetime import datetime
 from langchain_core.messages import HumanMessage
+from pandas_compat import get_pandas
 from agent_graph import drive_agent, AgentState
 from drive_tools import (
     initialize_tools, 
@@ -388,6 +389,8 @@ def create_gradio_interface():
         },
         test_data={'states': [], 'actions': []}  # 初始为空，实际使用时会更新
     )    
+    data_stage_message = None
+
     with gr.Blocks(title="Real-time Interactive Clinical Navigator", theme=gr.themes.Soft()) as demo:
         gr.Markdown("""
         # 🏥 Real-time Interactive Clinical Navigator
@@ -409,20 +412,25 @@ def create_gradio_interface():
                     with gr.Tab("📊 Data Management"):
                         gr.Markdown("### Data Source Configuration")
 
+                        gr.Markdown(
+                            "> Choose a source to unlock the controls. No data is generated or loaded until you press one of the action buttons."
+                        )
+
                         with gr.Row():
                             data_source_radio = gr.Radio(
                                 choices=["Virtual Data", "Real Data"],
-                                value="Virtual Data",
-                                label="Data Source"
+                                value=None,
+                                label="Data Source",
+                                info="Select the cohort you want to work with before loading any records"
                             )
                             current_source_text = gr.Textbox(
-                                value="Current: Virtual Data",
+                                value="No dataset loaded. Choose a source to begin.",
                                 label="Active Source",
                                 interactive=False
                             )
 
                         # Virtual data options
-                        with gr.Column(visible=True) as virtual_data_options:
+                        with gr.Column(visible=False) as virtual_data_options:
                             with gr.Row():
                                 n_patients_slider = gr.Slider(
                                     minimum=10,
@@ -442,10 +450,14 @@ def create_gradio_interface():
 
 
 
+                        data_stage_message = gr.Markdown(
+                            "👋 **Step 1:** Select a data source above and press the corresponding button to load it.",
+                            elem_classes=["data-stage-banner"]
+                        )
+
                         # Data statistics
                         gr.Markdown("### Dataset Overview")
-                        current_source_text = gr.Textbox(label="Active Source", interactive=False)
-                        stats_display = gr.Image(label="Dataset Statistics", interactive=False)
+                        stats_display = gr.Image(label="Dataset Statistics", interactive=False, value=None)
                         action_legend = gr.HTML(label="Action Legend", visible=False)
 
                         # Patient selection
@@ -454,7 +466,8 @@ def create_gradio_interface():
                             patient_dropdown = gr.Dropdown(
                                 label="Select Patient",
                                 choices=[],
-                                value=None
+                                value=None,
+                                interactive=False
                             )
                             refresh_patients_btn = gr.Button("🔄 Refresh List")
 
@@ -571,14 +584,17 @@ def create_gradio_interface():
 
                         retrain_output = gr.Markdown()
                     # Tab 3: Online Learning Monitor
-                    with gr.Tab("📊 Online Learning Monitor"):
+                    with gr.Tab("📊 Online Learning Monitor") as online_tab:
                         gr.Markdown("### Real-time Training Statistics")
+                        gr.Markdown(
+                            "> ℹ️ The online trainer stays paused after launch. Press **Start Online Training** when you are ready to stream new data."
+                        )
 
                         # 按钮行
                         with gr.Row():
                             refresh_stats_btn = gr.Button("🔄 Refresh Stats", variant="primary")
                             pause_btn = gr.Button("⏸️ Pause Training")
-                            resume_btn = gr.Button("▶️ Resume Training")
+                            resume_btn = gr.Button("▶️ Start Online Training")
                             evaluate_btn = gr.Button("📊 Run Evaluation", variant="secondary") # 添加这个
 
                         # 统计数据显示和 Active Learning Statistics JSON 显示在同一行，分成两列
@@ -822,7 +838,7 @@ def create_gradio_interface():
             """
             import matplotlib.pyplot as plt
             import numpy as np
-            import pandas as pd
+            pd = get_pandas()
             import io
             from PIL import Image
             from data_manager import data_manager

@@ -2,7 +2,8 @@
 import os, json, math, zipfile
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
-import pandas as pd
+from pandas_compat import get_pandas
+pd = get_pandas()
 
 from schema import SchemaSpec, ColumnMapping, ALIASES, FEATURE_ALIASES
 def _derive_reward_series(df: pd.DataFrame, spec: SchemaSpec, mp: ColumnMapping) -> pd.Series:

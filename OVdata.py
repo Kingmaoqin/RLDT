@@ -9,12 +9,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
+# Guard against older pyarrow wheels compiled for NumPy 1.x which can cause
+# `_ARRAY_API` errors when pandas enables the Arrow backend automatically.
+os.environ.setdefault("PANDAS_USE_PYARROW_BACKEND", "0")
+os.environ.setdefault("PANDAS_USE_PYARROW_EXTENSION_ARRAY", "0")
+
 import numpy as np
-import pandas as pd
+from RL0910.pandas_compat import get_pandas
+pd = get_pandas()
 
 
 def _import_cptac():
