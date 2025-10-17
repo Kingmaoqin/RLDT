@@ -341,14 +341,8 @@ def initialize_tools(inference_engine: DigitalTwinInference, cds: ClinicalDecisi
     globals()['get_next_expert_case'] = get_next_expert_case
     globals()['submit_expert_label'] = submit_expert_label
     globals()['get_expert_stats'] = get_expert_stats    
-    print("Online training system initialized and started")
-    # Auto-start stream so UI stats move
-    if _online_system and 'stream' in _online_system:
-        try:
-            _online_system['stream'].start_stream()
-        except Exception as e:
-            print(f"[WARN] stream not started: {e}")
-
+    print("Online training system initialized (stream paused)")
+    print("Use resume_online_training() from the UI to start streaming when ready.")
     print(f"Stream rate: {CURRENT_HYPERPARAMS['stream_rate']} transitions/sec")
     print(f"Initial tau: {CURRENT_HYPERPARAMS['tau']}")
 
@@ -924,11 +918,18 @@ def get_online_stats() -> Dict:
 
 
 def pause_online_training() -> Dict:
-    """Pause online training"""
-    if _online_system and 'stream' in _online_system:
-        _online_system['stream'].stop_stream()
+    """Pause the online training data stream"""
+    if not _online_system or 'stream' not in _online_system:
+        return {"error": "Online system not initialized"}
+
+    stream = _online_system['stream']
+    try:
+        if not getattr(stream, 'is_streaming', False):
+            return {"status": "paused", "message": "Online training already paused"}
+        stream.stop_stream()
         return {"status": "paused", "message": "Online training paused"}
-    return {"error": "Online system not initialized"}
+    except Exception as e:
+        return {"error": f"Failed to pause online training: {e}"}
 
 
 # def resume_online_training() -> Dict:
@@ -938,27 +939,29 @@ def pause_online_training() -> Dict:
 #         return {"status": "resumed", "message": "Online training resumed"}
 #     return {"error": "Online system not initialized"}
 def resume_online_training(silent: bool = True) -> dict:
-    """
-    恢复/启动在线训练；silent=True 时抑制 d3rlpy 与我们内部 logger 的冗余输出
-    """
+    """Resume or start the online training data stream"""
+    if not _online_system or 'stream' not in _online_system:
+        return {"error": "Online system not initialized"}
+
+    stream = _online_system['stream']
+
+    if getattr(stream, 'is_streaming', False):
+        return {"status": "running", "message": "Online training already running"}
+
     try:
         if silent:
-            import os, logging
+            import os
+            import logging
+
             os.environ["D3RLPY_LOG_LEVEL"] = "ERROR"
-            # d3rlpy 自己的 logger
             logging.getLogger("d3rlpy").setLevel(logging.ERROR)
             logging.getLogger("DiscreteBCQ").setLevel(logging.ERROR)
-            # 你若有自定义 logger 名称，可一并降低级别
             logging.getLogger("drive").setLevel(logging.WARNING)
 
-        # === 原有的在线训练启动逻辑（保持不变）===
-        # 例如：_online_system['trainer'].resume() / 启线程 / 初始化缓冲等
-        # TODO: 保留你现有的实现
-        # =========================================
-
-        return {"status": "running", "silent": silent}
+        stream.start_stream()
+        return {"status": "running", "message": "Online training started"}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Failed to start online training: {e}"}
 
 
 
@@ -1465,7 +1468,6 @@ def load_data_source(source_type: str,
         if source_type == "virtual":
             n_patients = n_patients or 1000
             df = data_manager.generate_virtual_data(n_patients=n_patients)
-            data_manager.set_data_source("virtual")
             return {
                 "status": "success",
                 "message": f"Generated virtual data for {n_patients} patients",
@@ -1491,7 +1493,6 @@ def load_data_source(source_type: str,
                 )
             else:
                 df = data_manager.load_real_data_schema_less(file_path)
-            data_manager.set_data_source("real")
             # 同步 meta 到推理引擎（供报告与在线使用）
             meta = data_manager.get_current_meta()
             try:
@@ -1623,7 +1624,11 @@ def get_cohort_stats() -> dict:
     import pandas as pd
     from data_manager import data_manager
 
-    df = data_manager.get_current_data()
+    try:
+        df = data_manager.get_current_data()
+    except Exception:
+        df = None
+
     if df is None or len(df) == 0:
         return dict(
             total_patients=0, total_records=0, n_actions=0,

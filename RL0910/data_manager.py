@@ -2,9 +2,15 @@
 data_manager.py - 管理虚拟数据和真实数据的读取
 """
 
+import os
+
+# pandas 依赖在部分环境中会尝试加载与 NumPy 不兼容的 pyarrow
+# 可用变量禁用 Arrow backend，避免 _ARRAY_API not found 报错
+os.environ.setdefault("PANDAS_USE_PYARROW_EXTENSION_ARRAY", "0")
+os.environ.setdefault("PANDAS_USE_PYARROW_BACKEND", "0")
+
 import pandas as pd
 import numpy as np
-import os
 from typing import Dict, List, Optional, Union
 from data import PatientDataGenerator
 import json
@@ -19,7 +25,7 @@ class DataManager:
     def __init__(self):
         self.virtual_data = None
         self.real_data = None
-        self.current_source = "virtual"  # "virtual" or "real"
+        self.current_source = None  # "virtual" / "real" once a dataset is prepared
         self.real_data_path = None
         self.current_meta = {}
         self.current_schema = {}
@@ -67,7 +73,8 @@ class DataManager:
             "action_map": {
                 a: name for a, name in zip(unique_actions, action_names)
             } if unique_actions else None,
-        }        
+        }
+        self.current_source = "virtual"
         print(f"Generated {len(self.virtual_data)} records for {n_patients} patients")
         return self.virtual_data
     
@@ -112,6 +119,7 @@ class DataManager:
                 } if unique_actions else None,
             }
 
+            self.current_source = "real"
             return self.real_data
         except Exception as e:
             print(f"Error loading real data: {e}")
@@ -251,44 +259,28 @@ class DataManager:
             f"{df['patient_id'].nunique()} patients, {len(feature_cols)} features.")
         return df
 
-    def set_data_source(self, source: str):
+    def set_data_source(self, source: str, ensure_available: bool = False):
         """设置当前使用的数据源"""
         if source not in ["virtual", "real"]:
             raise ValueError("Source must be 'virtual' or 'real'")
         self.current_source = source
         print(f"Data source set to: {source}")
-        if source == "virtual":
-            if self.virtual_data is None:
-                self.generate_virtual_data()
-            if self.current_meta is None:
-                feature_cols = [
-                    c
-                    for c in self.virtual_data.columns
-                    if c.startswith("state_") and not c.startswith("next_state_")
-                ]
-                unique_actions = (
-                    sorted(self.virtual_data['action'].unique())
-                    if 'action' in self.virtual_data.columns
-                    else []
-                )
-                action_names = [f"Action {a}" for a in unique_actions]
-                self.current_meta = {
-                    "feature_columns": feature_cols,
-                    "action_names": action_names if action_names else None,
-                    "action_map": {
-                        a: name for a, name in zip(unique_actions, action_names)
-                    } if unique_actions else None,
-                }    
+        if ensure_available:
+            if source == "virtual" and self.virtual_data is None:
+                raise ValueError("Virtual dataset not generated yet")
+            if source == "real" and self.real_data is None:
+                raise ValueError("Real dataset not loaded yet")
     def get_current_data(self) -> pd.DataFrame:
         """获取当前激活的数据"""
         if self.current_source == "virtual":
             if self.virtual_data is None:
-                self.generate_virtual_data()
+                raise ValueError("Virtual dataset not generated. Use the Data Management tab to create it.")
             return self.virtual_data
-        else:
+        if self.current_source == "real":
             if self.real_data is None:
                 raise ValueError("No real data loaded. Please load data first.")
             return self.real_data
+        raise ValueError("No dataset active. Choose a data source in the UI.")
     
     def get_patient_list(self) -> List[str]:
         """获取患者列表"""
