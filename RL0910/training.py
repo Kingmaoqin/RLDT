@@ -678,7 +678,7 @@ def train_outcome_model(data: Dict[str, List],
 
 
 def train_rl_policy(data: Dict[str, List],
-                   dynamics_models: List[TransformerDynamicsModel],  # 注意是列表
+                   dynamics_models: Union[TransformerDynamicsModel, List[TransformerDynamicsModel]],  # 可传单个或列表
                    outcome_model: TreatmentOutcomeModel,
                    state_dim: int,
                    action_dim: int,
@@ -687,11 +687,20 @@ def train_rl_policy(data: Dict[str, List],
                    save_dir: str = '.') -> ConservativeQNetwork:
     """Train the RL policy using Conservative Q-Learning with validation"""
     print("\nTraining RL Policy...")
-    
+
     # Initialize Q-network and trainer
     q_network = ConservativeQNetwork(state_dim, action_dim)
+    # Allow callers to pass a single dynamics model while guarding against empty inputs
+    if isinstance(dynamics_models, TransformerDynamicsModel):
+        dynamics_models = [dynamics_models]
+    elif not isinstance(dynamics_models, (list, tuple)):
+        raise TypeError("dynamics_models must be a TransformerDynamicsModel or a list/tuple of them")
+
+    if len(dynamics_models) == 0:
+        raise ValueError("dynamics_models list cannot be empty")
+
     trainer = ConservativeQLearning(
-        q_network, dynamics_model, outcome_model,
+        q_network, dynamics_models, outcome_model,
         learning_rate=3e-4,  # 可以稍微提高学习率
         cql_weight=0.1,
         device=device
