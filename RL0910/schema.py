@@ -4,6 +4,13 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any, Callable, Union
 from typing import Tuple
 
+import textwrap
+
+try:
+    import yaml
+except Exception:  # pragma: no cover - yaml is an optional dependency at runtime
+    yaml = None
+
 # 常用列名别名池（自动推断用）
 ALIASES = {
     "trajectory_id": {"trajectory_id", "traj_id", "traj", "episode", "episode_id", "patient_id", "subject", "subject_id", "id"},
@@ -90,3 +97,60 @@ class SchemaSpec:
             self.critical_features = [CriticalFeatureRule(**d) for d in self.critical_features]
         if isinstance(self.reward_spec, dict):
             self.reward_spec = RewardSpec(**self.reward_spec)
+
+    # ------------------------------------------------------------------
+    # YAML helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _ensure_yaml_available():
+        if yaml is None:
+            raise ImportError(
+                "PyYAML is required to load schema definitions. "
+                "Install it with `pip install pyyaml` or provide an already-parsed dict."
+            )
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SchemaSpec":
+        """Construct a SchemaSpec from a Python dictionary."""
+
+        if not isinstance(data, dict):
+            raise TypeError(
+                f"SchemaSpec.from_dict expected a mapping, got {type(data).__name__}"
+            )
+
+        # 兼容带有顶层 schema 键的结构
+        if "schema" in data and isinstance(data["schema"], dict):
+            data = data["schema"]
+
+        return cls(**data)
+
+    @classmethod
+    def from_yaml_text(cls, text: str) -> "SchemaSpec":
+        """Create a SchemaSpec instance from a YAML string."""
+
+        if text is None:
+            raise ValueError("SchemaSpec.from_yaml_text requires a non-empty string")
+
+        cleaned = textwrap.dedent(text).strip()
+        if not cleaned:
+            raise ValueError("Schema YAML is empty")
+
+        cls._ensure_yaml_available()
+
+        parsed = yaml.safe_load(cleaned)
+        if parsed is None:
+            raise ValueError("Schema YAML did not contain any data")
+
+        if isinstance(parsed, list):
+            if not parsed:
+                raise ValueError("Schema YAML contained an empty list")
+            parsed = parsed[-1]
+
+        return cls.from_dict(parsed)
+
+    @classmethod
+    def from_yaml_file(cls, path: str, encoding: str = "utf-8") -> "SchemaSpec":
+        """Load SchemaSpec directly from a YAML file path."""
+
+        with open(path, "r", encoding=encoding) as handle:
+            return cls.from_yaml_text(handle.read())

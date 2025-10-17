@@ -1427,7 +1427,7 @@ def quick_train_on_current_data(max_epochs: int = 5,
     if reward_series is None:
         return {"error": "Dataset must include a reward column."}
 
-    rewards_np = reward_series.astype(float).to_numpy()
+    rewards_np = reward_series.astype(np.float32).to_numpy(dtype=np.float32, copy=True)
 
     # Prepare action encoding
     raw_action_series = df_sorted.get("action")
@@ -1498,11 +1498,11 @@ def quick_train_on_current_data(max_epochs: int = 5,
 
     batch_size = max(32, min(batch_size, len(df_sorted)))
 
-    states_tensor = torch.from_numpy(state_matrix).to(device)
-    next_states_tensor = torch.from_numpy(next_state_matrix).to(device)
+    states_tensor = torch.from_numpy(state_matrix).to(device).float()
+    next_states_tensor = torch.from_numpy(next_state_matrix).to(device).float()
     actions_tensor = torch.from_numpy(actions_encoded).to(device)
-    rewards_tensor = torch.from_numpy(rewards_np).to(device)
-    returns_tensor = torch.from_numpy(returns).to(device)
+    rewards_tensor = torch.from_numpy(rewards_np).to(device).float()
+    returns_tensor = torch.from_numpy(returns).to(device).float()
 
     # Dynamics model: predict next state given current state/action
     dynamics_model.train()
