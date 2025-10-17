@@ -11,7 +11,8 @@ import os
 import json
 import time
 from collections import defaultdict, deque
-import pandas as pd
+from pandas_compat import get_pandas
+pd = get_pandas()
 from typing import Dict, List, Tuple
 import warnings
 warnings.filterwarnings('ignore')

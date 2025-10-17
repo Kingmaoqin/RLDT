@@ -9,7 +9,8 @@
 import os
 import argparse
 import numpy as np
-import pandas as pd
+from pandas_compat import get_pandas
+pd = get_pandas()
 from typing import List
 
 pd.options.mode.chained_assignment = None

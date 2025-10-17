@@ -8,7 +8,8 @@ to make treatment recommendations for new patients.
 import torch
 import numpy as np
 from typing import Dict, List, Tuple, Optional
-import pandas as pd
+from pandas_compat import get_pandas
+pd = get_pandas()
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime

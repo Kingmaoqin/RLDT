@@ -3,7 +3,8 @@ online_evaluation.py - Evaluation methods for online learning system
 """
 
 import numpy as np
-import pandas as pd
+from pandas_compat import get_pandas
+pd = get_pandas()
 import torch
 from typing import Dict, List, Tuple, Optional
 import matplotlib.pyplot as plt
