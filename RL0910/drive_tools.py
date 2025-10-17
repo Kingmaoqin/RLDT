@@ -9,6 +9,13 @@ import numpy as np
 import threading
 import queue
 import os
+
+# Pandas may attempt to enable the Arrow backend which requires a newer
+# pyarrow/NumPy toolchain. Explicitly disable it before importing pandas so the
+# UI can start even in older environments (e.g. NumPy 1.x compiled wheels).
+os.environ.setdefault("PANDAS_USE_PYARROW_BACKEND", "0")
+os.environ.setdefault("PANDAS_USE_PYARROW_EXTENSION_ARRAY", "0")
+
 from datetime import datetime
 import torch
 import torch.nn.functional as F
@@ -126,6 +133,7 @@ class BCQInferenceAdapter:
 _inference_engine = None
 _cds = None
 _online_system = None
+_pending_online_models: Optional[Dict[str, Any]] = None
 _training_queue = queue.Queue()
 _training_status = {}       
 EXPERT_MODE = "automatic"  # "automatic" or "manual"
@@ -151,11 +159,12 @@ _feature_keys: List[str] = []
 
 def initialize_tools(inference_engine: DigitalTwinInference, cds: ClinicalDecisionSupport):
     """Initialize the global tool instances with online learning support"""
-    global _inference_engine, _cds, _online_system
+    global _inference_engine, _cds, _online_system, _pending_online_models
     _inference_engine = inference_engine
     _cds = cds
-    
-    # Initialize online training system
+    _online_system = None  # 延迟初始化在线训练系统
+
+    # Prepare the ensemble that will later power the online loop once requested.
     models = {
         'dynamics_model': inference_engine.dynamics_model,
         'outcome_model': inference_engine.outcome_model,
@@ -165,46 +174,31 @@ def initialize_tools(inference_engine: DigitalTwinInference, cds: ClinicalDecisi
             n_ensemble=5  # 论文中明确提到K=5
         )
     }
-    
+
     # 为集成创建足够的多样性 - 按照论文方法
     base_state_dict = inference_engine.q_network.state_dict()
-    
-    for i, q_net in enumerate(models['q_ensemble'].q_networks):
+
+    for q_net in models['q_ensemble'].q_networks:
         # 加载基础权重
         q_net.load_state_dict(base_state_dict)
-        
-        # FIX: 移除手动添加噪声的代码。
-        # 不同的随机种子已经足够确保模型在训练中产生多样性，且这种方式更稳定。
-        
-        # 为每个网络设置不同的初始化种子，确保训练过程中的随机性
-        # torch.manual_seed(42 + i * 100)
-        # 手动噪声注入已移除以提高稳定性（见上方注释）
-    
-    # 创建在线系统
-    _online_system = create_online_training_system(
-        models,
-        sampler_type='hybrid',  # 论文中使用的混合采样
-        tau=CURRENT_HYPERPARAMS['tau'],
-        stream_rate=CURRENT_HYPERPARAMS['stream_rate']
-    )
-    
-    # EXPERT_MODE = "automatic"  # "automatic" or "manual"
-    # EXPERT_QUEUE = deque(maxlen=100)
-    # EXPERT_LABELS_SUBMITTED = []
+
+    _pending_online_models = models
+
+    print("Online training components staged. Streaming will be created when you press Start Online Training.")
 
     def set_expert_mode(mode: str) -> Dict:
         """设置专家反馈模式"""
         global EXPERT_MODE, _online_system
-        
+
         if mode not in ["automatic", "manual"]:
             return {"error": "Invalid mode. Choose 'automatic' or 'manual'"}
-        
+
         EXPERT_MODE = mode
-        
+
         # 更新在线系统的专家模式
-        if _online_system and 'expert' in _online_system:
+        if _ensure_online_system() and 'expert' in _online_system:
             _online_system['expert'].manual_mode = (mode == "manual")
-        
+
         return {
             "status": "success",
             "mode": mode,
@@ -215,8 +209,8 @@ def initialize_tools(inference_engine: DigitalTwinInference, cds: ClinicalDecisi
         """获取下一个需要专家标注的案例"""
         global EXPERT_QUEUE, _online_system
         
-        if not _online_system or 'active_learner' not in _online_system:
-            return {"error": "System not initialized"}
+        if not _ensure_online_system():
+            return {"error": "Online system not initialized"}
         
         # 从查询队列获取案例
         if _online_system['active_learner'].query_queue:
@@ -402,6 +396,9 @@ def update_hyperparams(params: Dict) -> Dict:
                 tier3_updates.append(param)
         
         # 执行 Tier 2 更新 - 500次梯度步骤的快速适应
+        if tier2_updates:
+            if not _ensure_online_system():
+                return {"error": "Online system not initialized"}
         if tier2_updates and _online_system and 'trainer' in _online_system:
             job_id = f"tier2_adaptation_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             _trigger_tier2_adaptation(job_id, tier2_updates, params)
@@ -445,7 +442,7 @@ def _trigger_tier2_adaptation(job_id: str, params_to_adapt: List[str], new_value
     
     def adaptation_thread():
         try:
-            if _online_system and 'trainer' in _online_system:
+            if _ensure_online_system() and 'trainer' in _online_system:
                 trainer = _online_system['trainer']
                 
                 # 更新训练器参数
@@ -505,7 +502,7 @@ def _trigger_online_finetune(job_id: str, params_to_finetune: List[str]):
             # Run focused finetuning
             if 'alpha' in params_to_finetune or 'gamma' in params_to_finetune:
                 # Update Q-network training
-                if _online_system and 'trainer' in _online_system:
+                if _ensure_online_system() and 'trainer' in _online_system:
                     # Update CQL weight and gamma
                     _online_system['trainer'].update_hyperparameters({
                         'cql_weight': CURRENT_HYPERPARAMS['alpha'],
@@ -878,7 +875,7 @@ def online_finetune(job_params: Dict) -> Dict:
         }
         
         # Use online trainer for incremental updates
-        if _online_system and 'trainer' in _online_system:
+        if _ensure_online_system() and 'trainer' in _online_system:
             # Force some training iterations
             for _ in range(100):
                 _online_system['trainer']._train_step()
@@ -898,7 +895,7 @@ def online_finetune(job_params: Dict) -> Dict:
 
 def get_online_stats() -> Dict:
     """Get online training statistics"""
-    if not _online_system or 'trainer' not in _online_system:
+    if not _ensure_online_system() or 'trainer' not in _online_system:
         return {"error": "Online system not initialized"}
 
     stats = _online_system['trainer'].get_statistics()

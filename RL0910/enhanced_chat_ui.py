@@ -2,6 +2,13 @@
 enhanced_chat_ui.py - Enhanced UI for DRIVE with online learning and hot parameter updates
 """
 
+import os
+
+# Keep pandas compatible with older pyarrow wheels by disabling the Arrow backend
+# before any module-level pandas import occurs (drive_tools, data_manager, etc.).
+os.environ.setdefault("PANDAS_USE_PYARROW_BACKEND", "0")
+os.environ.setdefault("PANDAS_USE_PYARROW_EXTENSION_ARRAY", "0")
+
 import gradio as gr
 import json
 import argparse
@@ -369,7 +376,7 @@ def create_gradio_interface():
     """Create the full Gradio interface with chat, parameter control, and online learning monitor"""
     
     # Initialize models
-    print("Initializing system with online learning...")
+    print("Preparing inference models... (online training stays paused until started from the UI)")
     inference_engine, cds = load_models_and_initialize()
     
     print("Initializing evaluation system...")
@@ -1902,9 +1909,23 @@ def create_gradio_interface():
                 al_stats_table  # 添加table
             ]
         )
-        
+
         pause_btn.click(pause_online_training)
         resume_btn.click(resume_online_training)
+
+        online_tab.select(
+            refresh_online_stats,
+            outputs=[
+                total_transitions,
+                query_rate,
+                buffer_size,
+                avg_uncertainty,
+                current_tau,
+                training_updates,
+                al_stats_plot,
+                al_stats_table,
+            ]
+        )
         
         def run_custom_evaluation(duration, scenario):
             """运行自定义评估"""
@@ -2234,20 +2255,6 @@ def create_gradio_interface():
             download_evaluation_report,
             outputs=[report_file]
         )        
-        # Auto-refresh stats every 5 seconds when the tab is active
-        demo.load(
-            refresh_online_stats,
-            outputs=[
-                total_transitions,
-                query_rate,
-                buffer_size,
-                avg_uncertainty,
-                current_tau,
-                training_updates,
-                al_stats_plot,
-                al_stats_table
-            ]
-        )
         def update_live_monitoring():
             """更新实时监控指标"""
             try:
@@ -2291,13 +2298,6 @@ def create_gradio_interface():
             except Exception as e:
                 return 0, 0, 0, "Error", 0, f"Error: {str(e)}"
             
-        # Load initial data on startup
-        demo.load(
-            generate_virtual_data,
-            inputs=[n_patients_slider],
-            outputs=[current_source_text, stats_display, action_legend, patient_dropdown]
-        )
-    
     return demo
 
 
