@@ -9,14 +9,15 @@ import os
 os.environ.setdefault("PANDAS_USE_PYARROW_EXTENSION_ARRAY", "0")
 os.environ.setdefault("PANDAS_USE_PYARROW_BACKEND", "0")
 
-import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 from data import PatientDataGenerator
 import json
 from adapters import TabularAdapter, SensorAdapter
 from schema import SchemaSpec
-from typing import Tuple
+from pandas_compat import get_pandas
+
+pd = get_pandas()
 
 
 class DataManager:
