@@ -260,7 +260,12 @@ class DataManager:
         from adapters import TabularAdapter, SensorAdapter
 
         # 1) 读取 Schema
-        spec = self._load_schema_spec(schema_path=schema_path, schema_yaml=schema_yaml)
+        if schema_yaml:
+            spec = SchemaSpec.from_yaml_text(schema_yaml)
+        elif schema_path:
+            spec = SchemaSpec.from_yaml_file(schema_path)
+        else:
+            raise ValueError("Real data need schema_path or schema_yaml")
 
         # 2) 选择适配器
         kind = getattr(spec, "kind", "tabular").lower()
