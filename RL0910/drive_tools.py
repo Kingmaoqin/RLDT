@@ -1468,7 +1468,6 @@ def load_data_source(source_type: str,
         if source_type == "virtual":
             n_patients = n_patients or 1000
             df = data_manager.generate_virtual_data(n_patients=n_patients)
-            data_manager.set_data_source("virtual")
             return {
                 "status": "success",
                 "message": f"Generated virtual data for {n_patients} patients",
@@ -1494,7 +1493,6 @@ def load_data_source(source_type: str,
                 )
             else:
                 df = data_manager.load_real_data_schema_less(file_path)
-            data_manager.set_data_source("real")
             # 同步 meta 到推理引擎（供报告与在线使用）
             meta = data_manager.get_current_meta()
             try:
@@ -1626,7 +1624,11 @@ def get_cohort_stats() -> dict:
     import pandas as pd
     from data_manager import data_manager
 
-    df = data_manager.get_current_data()
+    try:
+        df = data_manager.get_current_data()
+    except Exception:
+        df = None
+
     if df is None or len(df) == 0:
         return dict(
             total_patients=0, total_records=0, n_actions=0,

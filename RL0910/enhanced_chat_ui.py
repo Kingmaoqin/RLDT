@@ -7,7 +7,6 @@ import json
 import argparse
 import sys
 import os
-import pandas as pd
 from datetime import datetime
 from langchain_core.messages import HumanMessage
 from agent_graph import drive_agent, AgentState
@@ -372,10 +371,6 @@ def create_gradio_interface():
     # Initialize models
     print("Initializing system with online learning...")
     inference_engine, cds = load_models_and_initialize()
-    
-    # Initialize data manager with virtual data
-    print("Generating initial virtual data...")
-    data_manager.generate_virtual_data(n_patients=100)
     
     print("Initializing evaluation system...")
     evaluation_pipeline = create_online_evaluation_pipeline(
@@ -1010,82 +1005,6 @@ def create_gradio_interface():
             
             return Image.open(buf)
 
-        def _on_change_source(src):
-            if src == "Virtual Data":
-                return gr.update(visible=True), gr.update(visible=False), "Current: Virtual Data"
-            else:
-                return gr.update(visible=False), gr.update(visible=True), "Current: Real Data"
-
-        data_source_radio.change(
-            fn=_on_change_source,
-            inputs=[data_source_radio],
-            outputs=[virtual_data_options, real_data_options, current_source_text]
-        )
-
-        # 2) 生成虚拟数据
-        def _on_generate_virtual(n_pat):
-            stats = data_manager.generate_virtual_data(n_patients=int(n_pat))
-            plist = get_patient_list()
-            img = create_dataset_stats_image(get_cohort_stats())
-
-            # 构建动作图例
-            from drive_tools import get_action_legend_html
-            legend_html = get_action_legend_html()
-            from drive_tools import get_action_legend_html
-            legend_html = get_action_legend_html()
-            return (
-                gr.update(choices=plist, value=(plist[0] if plist else None)),
-                img,
-                gr.update(value=legend_html, visible=bool(legend_html)),
-                f"Loaded {len(plist)} patients from Real Data"
-            )
-
-
-        # 3) 加载真实数据
-        def _on_load_real(data_file, schema_file):
-            # 真正加载：drive_tools.load_data_source 会同步 meta
-            path = data_file.name if data_file else None
-            schema = schema_file.name if schema_file else None
-
-            # 正确的调用方式：明确 source_type="real"
-            res = load_data_source("real", file_path=path, schema_path=schema)
-
-            plist = get_patient_list()
-            patient_choices = plist.get("patients", []) if isinstance(plist, dict) else plist
-
-            img = create_dataset_stats_image(get_cohort_stats())
-            return (
-                gr.update(choices=patient_choices, value=(patient_choices[0] if patient_choices else None)),
-                img,
-                f"Loaded {len(patient_choices)} patients from Real Data"
-            )
-
-        # 4) 刷新患者列表
-        def _on_refresh_patients():
-            plist = get_patient_list()
-            patient_choices = plist.get("patients", []) if isinstance(plist, dict) else plist
-            return gr.update(choices=patient_choices)
-
-        refresh_patients_btn.click(
-            fn=_on_refresh_patients,
-            inputs=[],
-            outputs=[patient_dropdown]
-        )
-
-        # 5) 选择患者 -> 刷新顶部“Active Patient”和左侧基本信息图
-        def _on_select_patient(pid):
-            if not pid:
-                return "No patient selected", None
-            info = get_patient_data(pid)
-            fig = create_patient_visualization(info)
-            return f"Active: {pid}", fig
-
-        patient_dropdown.change(
-            fn=_on_select_patient,
-            inputs=[patient_dropdown],
-            outputs=[active_patient_display, patient_info_display]
-        )
-
         def create_patient_visualization(patient_info):
             """Create visualization for patient information"""
             if not patient_info or "error" in patient_info:
@@ -1410,44 +1329,72 @@ def create_gradio_interface():
 
 
         # Event handlers for Data Management
-        def toggle_data_options(source):
+        def handle_data_source_change(source):
+            default_banner = "👋 **Step 1:** Select a data source above and press the corresponding button to load it."
+
             if source == "Virtual Data":
-                return gr.update(visible=True), gr.update(visible=False)
-            else:
-                return gr.update(visible=False), gr.update(visible=True)
+                return (
+                    gr.update(visible=True),
+                    gr.update(visible=False),
+                    "Virtual demo data selected. Click 'Generate Virtual Data' when you're ready.",
+                    gr.update(value="✅ Step 2: Press **Generate Virtual Data** to build the demo cohort."),
+                )
+            if source == "Real Data":
+                return (
+                    gr.update(visible=False),
+                    gr.update(visible=True),
+                    "Real dataset selected. Upload your files and click 'Load Real Data'.",
+                    gr.update(value="✅ Step 2: Upload your dataset and click **Load Real Data**."),
+                )
+
+            return (
+                gr.update(visible=False),
+                gr.update(visible=False),
+                "No dataset loaded. Choose a source to begin.",
+                gr.update(value=default_banner),
+            )
                 
         def generate_virtual_data(n_patients):
-            from data_manager import data_manager
-            from drive_tools import get_cohort_stats, get_action_legend_html
+            from drive_tools import load_data_source, get_cohort_stats, get_action_legend_html
             try:
-                data_manager.generate_virtual_data(n_patients=int(n_patients))
+                result = load_data_source("virtual", n_patients=int(n_patients))
                 stats = get_cohort_stats()
-                img = create_dataset_stats_image(stats)
+                img = create_dataset_stats_image(stats) if stats else None
                 legend_html = get_action_legend_html()
 
                 lst = get_patient_list()
                 choices = lst.get("patients", []) if isinstance(lst, dict) else lst
+                message = result.get("message") if isinstance(result, dict) else None
+                status_text = message or f"Virtual cohort ready with {len(choices)} patients."
 
-                # 返回顺序必须和 outputs 对齐：
-                # [current_source_text, stats_display, action_legend, patient_dropdown]
+                follow_up = (
+                    "✅ Virtual demo cohort loaded. Browse patients below or open the Online Learning tab when you're ready. "
+                    "Streaming stays paused until you press **Start Online Training**."
+                )
+
                 return (
-                    f"Loaded {len(choices)} patients (virtual)",
+                    status_text,
                     img,
                     gr.update(value=legend_html, visible=bool(legend_html)),
-                    gr.update(choices=choices, value=(choices[0] if choices else None)),
+                    gr.update(
+                        choices=choices,
+                        value=(choices[0] if choices else None),
+                        interactive=bool(choices),
+                    ),
+                    gr.update(value=follow_up),
                 )
             except Exception as e:
-                # 占位图片，防止 UI 崩
                 import matplotlib.pyplot as plt, io
                 from PIL import Image
-                fig, ax = plt.subplots(1,1,figsize=(6,3)); ax.axis("off")
-                ax.text(0.5,0.5,f"Error: {e}",ha="center",va="center"); buf=io.BytesIO()
+                fig, ax = plt.subplots(1, 1, figsize=(6, 3)); ax.axis("off")
+                ax.text(0.5, 0.5, f"Error: {e}", ha="center", va="center"); buf = io.BytesIO()
                 plt.tight_layout(); plt.savefig(buf, format="png", dpi=120, bbox_inches="tight"); buf.seek(0); plt.close(fig)
                 return (
                     f"❌ Generate error: {e}",
                     Image.open(buf),
                     gr.update(value="", visible=False),
-                    gr.update(),  # 下拉不更新
+                    gr.update(choices=[], value=None, interactive=False),
+                    gr.update(value="⚠️ Failed to prepare demo data. Check the logs and try again."),
                 )
 
 
@@ -1455,69 +1402,97 @@ def create_gradio_interface():
             from drive_tools import load_data_source, get_cohort_stats, get_action_legend_html
             try:
                 if file is None:
-                    return "Please upload a data file", None, gr.update(value="", visible=False), gr.update()
+                    return (
+                        "Please upload a data file before loading.",
+                        None,
+                        gr.update(value="", visible=False),
+                        gr.update(choices=[], value=None, interactive=False),
+                        gr.update(value="⚠️ Waiting for a dataset file."),
+                    )
 
                 schema_path = schema_file.name if schema_file else None
                 res = load_data_source("real", file_path=file.name, schema_path=schema_path)
 
                 stats = get_cohort_stats()
-                img = create_dataset_stats_image(stats)
+                img = create_dataset_stats_image(stats) if stats else None
                 legend_html = get_action_legend_html()
 
                 lst = get_patient_list()
                 choices = lst.get("patients", []) if isinstance(lst, dict) else lst
-                msg = f"Loaded {res.get('patients', len(choices))} patients ({res.get('records','?')} records)" if isinstance(res, dict) else "Loaded"
+                msg = (
+                    f"Loaded {res.get('patients', len(choices))} patients ({res.get('records', '?')} records)"
+                    if isinstance(res, dict)
+                    else "Loaded dataset"
+                )
+
+                follow_up = (
+                    "✅ Real dataset loaded. Review the schema preview below and assign patients before launching online learning. "
+                    "Streaming remains paused until **Start Online Training** is pressed."
+                )
 
                 return (
                     msg,
                     img,
                     gr.update(value=legend_html, visible=bool(legend_html)),
-                    gr.update(choices=choices, value=(choices[0] if choices else None)),
+                    gr.update(
+                        choices=choices,
+                        value=(choices[0] if choices else None),
+                        interactive=bool(choices),
+                    ),
+                    gr.update(value=follow_up),
                 )
             except Exception as e:
                 import matplotlib.pyplot as plt, io
                 from PIL import Image
-                fig, ax = plt.subplots(1,1,figsize=(6,3)); ax.axis("off")
-                ax.text(0.5,0.5,f"Error: {e}",ha="center",va="center"); buf=io.BytesIO()
+                fig, ax = plt.subplots(1, 1, figsize=(6, 3)); ax.axis("off")
+                ax.text(0.5, 0.5, f"Error: {e}", ha="center", va="center"); buf = io.BytesIO()
                 plt.tight_layout(); plt.savefig(buf, format="png", dpi=120, bbox_inches="tight"); buf.seek(0); plt.close(fig)
                 return (
                     f"❌ Load error: {e}",
                     Image.open(buf),
                     gr.update(value="", visible=False),
-                    gr.update(),
+                    gr.update(choices=[], value=None, interactive=False),
+                    gr.update(value="⚠️ Unable to load the dataset. Verify the file and schema."),
                 )
 
         
         def refresh_patient_list():
             patients = get_patient_list()
-            if "error" not in patients:
+            if isinstance(patients, dict) and "error" not in patients:
                 patient_choices = patients.get("patients", [])
-                return gr.update(choices=patient_choices, value=patient_choices[0] if patient_choices else None)
-            return gr.update()
+                return gr.update(
+                    choices=patient_choices,
+                    value=patient_choices[0] if patient_choices else None,
+                    interactive=bool(patient_choices),
+                )
+            return gr.update(choices=[], value=None, interactive=False)
         
         def display_patient_info(patient_id):
             if not patient_id:
                 return None, None, "No patient selected"
-            
+
             patient_info = get_patient_data(patient_id)
-            if "error" in patient_info:
-                return None, None, patient_id
-            
+            if not patient_info or "error" in patient_info:
+                warning = patient_info.get("error", "Unable to load patient details") if isinstance(patient_info, dict) else "Unable to load patient details"
+                return None, None, warning
+
             patient_viz = create_patient_visualization(patient_info)
             return patient_viz, None, f"Patient: {patient_id}"
         
         def analyze_patient_fn(patient_id):
             if not patient_id:
                 return None
-            
+
             analysis = analyze_patient(patient_id)
+            if analysis.get("error"):
+                return None
             analysis_viz = create_analysis_visualization(analysis)
             return analysis_viz
-        
+
         def export_patient_fn(patient_id):
             if not patient_id:
                 return None
-            
+
             try:
                 output_path = f"patient_{patient_id}_export.json"
                 data_manager.export_patient_data(patient_id, output_path)
@@ -1773,15 +1748,15 @@ def create_gradio_interface():
         
         # Data Management events
         data_source_radio.change(
-            toggle_data_options,
+            handle_data_source_change,
             inputs=[data_source_radio],
-            outputs=[virtual_data_options, real_data_options]
+            outputs=[virtual_data_options, real_data_options, current_source_text, data_stage_message]
         )
         
         generate_btn.click(
             fn=generate_virtual_data,
             inputs=[n_patients_slider],
-            outputs=[current_source_text, stats_display, action_legend, patient_dropdown]  # ← 顺序固定
+            outputs=[current_source_text, stats_display, action_legend, patient_dropdown, data_stage_message]  # ← 顺序固定
         )
 
 
@@ -1795,7 +1770,7 @@ def create_gradio_interface():
         load_real_btn.click(
             fn=load_real_data,
             inputs=[file_upload, schema_upload],
-            outputs=[current_source_text, stats_display, action_legend, patient_dropdown]  # ← 顺序固定
+            outputs=[current_source_text, stats_display, action_legend, patient_dropdown, data_stage_message]  # ← 顺序固定
         )
 
         
