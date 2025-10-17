@@ -4,9 +4,29 @@ from __future__ import annotations
 import builtins
 import os
 import sys
+import types
 from contextlib import contextmanager
 from types import ModuleType
 from typing import Iterator
+
+
+# ---------------------------------------------------------------------------
+# Optional dependency handling
+# ---------------------------------------------------------------------------
+# Some deployment environments bundle an older NumPy that cannot import recent
+# ``pyarrow`` wheels.  Pandas will still try to import ``pyarrow`` when the
+# Arrow backend is enabled which results in crashes like
+# ``AttributeError: module 'pyarrow.lib' has no attribute '_ARRAY_API'``.  The
+# UI should keep running even without a working Arrow stack, so we register a
+# lightweight stub whenever pyarrow is unavailable.  This mirrors the snippet
+# requested by the user and keeps pandas happy while falling back to its NumPy
+# implementation.
+if "pyarrow" not in sys.modules:
+    pa_stub = types.ModuleType("pyarrow")
+    pa_stub.__version__ = "0"
+    pa_stub.lib = types.ModuleType("pyarrow.lib")
+    sys.modules["pyarrow"] = pa_stub
+    sys.modules["pyarrow.lib"] = pa_stub.lib
 
 
 _PANDAS_MODULE_NAME = "pandas"
