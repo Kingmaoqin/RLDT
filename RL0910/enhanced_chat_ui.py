@@ -13,6 +13,7 @@ import gradio as gr
 import json
 import argparse
 import sys
+import os
 from datetime import datetime
 from langchain_core.messages import HumanMessage
 from pandas_compat import get_pandas

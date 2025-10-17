@@ -10,6 +10,12 @@ import threading
 import queue
 import os
 
+# Pandas may attempt to enable the Arrow backend which requires a newer
+# pyarrow/NumPy toolchain. Explicitly disable it before importing pandas so the
+# UI can start even in older environments (e.g. NumPy 1.x compiled wheels).
+os.environ.setdefault("PANDAS_USE_PYARROW_BACKEND", "0")
+os.environ.setdefault("PANDAS_USE_PYARROW_EXTENSION_ARRAY", "0")
+
 from datetime import datetime
 import torch
 import torch.nn.functional as F

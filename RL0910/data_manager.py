@@ -4,8 +4,12 @@ data_manager.py - 管理虚拟数据和真实数据的读取
 
 import os
 
-from pandas_compat import get_pandas
-pd = get_pandas()
+# pandas 依赖在部分环境中会尝试加载与 NumPy 不兼容的 pyarrow
+# 可用变量禁用 Arrow backend，避免 _ARRAY_API not found 报错
+os.environ.setdefault("PANDAS_USE_PYARROW_EXTENSION_ARRAY", "0")
+os.environ.setdefault("PANDAS_USE_PYARROW_BACKEND", "0")
+
+import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Union
 from data import PatientDataGenerator
