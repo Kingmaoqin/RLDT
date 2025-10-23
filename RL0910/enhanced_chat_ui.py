@@ -16,46 +16,149 @@ import sys
 import os
 import uuid
 from datetime import datetime
-from langchain_core.messages import HumanMessage
+import importlib.util
+from typing import Any, List, TypedDict
+from types import SimpleNamespace
+
+_LANGCHAIN_CORE_AVAILABLE = importlib.util.find_spec("langchain_core") is not None
+_LANGGRAPH_AVAILABLE = importlib.util.find_spec("langgraph") is not None
+LLM_STACK_AVAILABLE = _LANGCHAIN_CORE_AVAILABLE and _LANGGRAPH_AVAILABLE
+
+if LLM_STACK_AVAILABLE:
+    from langchain_core.messages import HumanMessage as _HumanMessage
+else:
+    class _HumanMessage:  # type: ignore[override]
+        """Lightweight stand-in when LangChain is unavailable."""
+
+        def __init__(self, content: str):
+            self.content = content
+            self.type = "human"
+
+
+HumanMessage = _HumanMessage
+
 from pandas_compat import get_pandas
-from agent_graph import drive_agent, AgentState
-from drive_tools import (
-    initialize_tools, 
-    describe_parameter,
-    recommend_parameters,
-    update_reward_parameters,
-    retrain_model,
-    get_patient_list,
-    get_patient_data,
-    analyze_patient,
-    load_data_source,
-    get_cohort_stats,
-    update_hyperparams,  # New hot update function
-    online_finetune,      # New online finetuning
-    get_online_stats,     # New online stats
-    pause_online_training,    # New pause function
-    resume_online_training    # New resume function
+
+if LLM_STACK_AVAILABLE:
+    from agent_graph import drive_agent, AgentState
+    LLM_DISABLED_MESSAGE = ""
+else:
+    class AgentState(TypedDict):
+        messages: List[Any]
+        human_review: bool
+
+
+    class _FallbackAIMessage(SimpleNamespace):
+        def __init__(self, content: str):
+            super().__init__(type="ai", content=content, tool_calls=[])
+
+
+    class _FallbackDriveAgent:
+        """Graceful fallback when LangChain/LangGraph are missing."""
+
+        notice = (
+            "LLM co-pilot is disabled because LangChain and LangGraph are not installed. "
+            "Install optional dependencies to enable LLM-assisted guidance."
+        )
+
+        def invoke(self, state: AgentState):  # type: ignore[override]
+            return {"messages": [_FallbackAIMessage(self.notice)], "human_review": False}
+
+
+    drive_agent = _FallbackDriveAgent()
+    LLM_DISABLED_MESSAGE = _FallbackDriveAgent.notice
+    print("[WARN] LangChain/LangGraph not found. LLM co-pilot features are disabled.")
+
+MODEL_STACK_AVAILABLE = importlib.util.find_spec("torch") is not None
+BACKEND_DISABLED_MESSAGE = (
+    "Clinical models are unavailable because PyTorch is not installed."
 )
-from data_manager import data_manager
-from inference import DigitalTwinInference, ClinicalDecisionSupport
-from models import TransformerDynamicsModel, TreatmentOutcomeModel, ConservativeQNetwork
-import torch
+
+if MODEL_STACK_AVAILABLE:
+    from drive_tools import (
+        initialize_tools,
+        describe_parameter,
+        recommend_parameters,
+        update_reward_parameters,
+        retrain_model,
+        get_patient_list,
+        get_patient_data,
+        analyze_patient,
+        load_data_source,
+        get_cohort_stats,
+        update_hyperparams,
+        online_finetune,
+        get_online_stats,
+        pause_online_training,
+        resume_online_training,
+        generate_patient_report,
+        generate_patient_report_ui,
+    )
+    from data_manager import data_manager
+    from inference import DigitalTwinInference, ClinicalDecisionSupport
+    from models import TransformerDynamicsModel, TreatmentOutcomeModel, ConservativeQNetwork
+    from online_evaluation import OnlineEvaluator, ContinualEvaluator, create_online_evaluation_pipeline
+    from run_complete_evaluation import (
+        run_enhanced_evaluation,
+        test_safety_compliance,
+        trigger_distribution_shift_test,
+        generate_paper_compliance_report,
+    )
+    from online_monitor import OnlineSystemMonitor
+    from system_health_check import SystemHealthChecker
+    import torch
+else:
+    def _backend_error_response(*_args, **_kwargs):
+        return {"error": BACKEND_DISABLED_MESSAGE}
+
+    def initialize_tools(*_args, **_kwargs):  # type: ignore[override]
+        return None
+
+    describe_parameter = recommend_parameters = update_reward_parameters = _backend_error_response  # type: ignore[assignment]
+    retrain_model = get_patient_list = get_patient_data = analyze_patient = _backend_error_response  # type: ignore[assignment]
+    load_data_source = get_cohort_stats = update_hyperparams = _backend_error_response  # type: ignore[assignment]
+    online_finetune = get_online_stats = _backend_error_response  # type: ignore[assignment]
+    pause_online_training = resume_online_training = _backend_error_response  # type: ignore[assignment]
+
+    def generate_patient_report(*_args, **_kwargs):  # type: ignore[override]
+        return "Report unavailable", None
+
+    def generate_patient_report_ui(*_args, **_kwargs):  # type: ignore[override]
+        return (
+            "<p>Report generation is disabled because the clinical models are not available.</p>",
+            None,
+            None,
+        )
+
+    class _FallbackDataManager:
+        current_source = "unavailable"
+
+        def get_current_data(self):
+            return get_pandas().DataFrame()
+
+        def get_current_meta(self):
+            return {}
+
+        def export_patient_data(self, *_args, **_kwargs):
+            raise RuntimeError(BACKEND_DISABLED_MESSAGE)
+
+        def get_patient_state(self, *_args, **_kwargs):
+            return {}
+
+    data_manager = _FallbackDataManager()  # type: ignore[assignment]
+    DigitalTwinInference = ClinicalDecisionSupport = None  # type: ignore[assignment]
+    TransformerDynamicsModel = TreatmentOutcomeModel = ConservativeQNetwork = None  # type: ignore[assignment]
+    OnlineEvaluator = ContinualEvaluator = create_online_evaluation_pipeline = None  # type: ignore[assignment]
+    run_enhanced_evaluation = test_safety_compliance = trigger_distribution_shift_test = _backend_error_response  # type: ignore[assignment]
+    generate_paper_compliance_report = _backend_error_response  # type: ignore[assignment]
+    OnlineSystemMonitor = None  # type: ignore[assignment]
+    SystemHealthChecker = None  # type: ignore[assignment]
+    torch = None  # type: ignore[assignment]
 import numpy as np
 import matplotlib.pyplot as plt
 import io
 import base64
 from PIL import Image
-from online_evaluation import OnlineEvaluator, ContinualEvaluator, create_online_evaluation_pipeline
-from run_complete_evaluation import (
-    run_enhanced_evaluation,
-    test_safety_compliance,
-    trigger_distribution_shift_test,
-    generate_paper_compliance_report
-)
-from online_monitor import OnlineSystemMonitor
-from system_health_check import SystemHealthChecker
-
-from drive_tools import load_data_source, generate_patient_report, generate_patient_report_ui
 
 # ---- Optional BCQ loader ----
 def _load_bcq_policy(path: str):
@@ -506,6 +609,30 @@ def retrain_with_params(preset, alpha, gamma, lr, reg_weight, batch_size, n_epoc
 def create_gradio_interface():
     """Create the full Gradio interface with chat, parameter control, and online learning monitor"""
 
+    if not MODEL_STACK_AVAILABLE:
+        with gr.Blocks(
+            title="Real-time Interactive Clinical Navigator",
+            theme=gr.themes.Soft(primary_hue="indigo", secondary_hue="blue", neutral_hue="slate"),
+            css=CUSTOM_CSS,
+        ) as demo:
+            if not LLM_STACK_AVAILABLE:
+                gr.Markdown(
+                    f"> ⚠️ **LLM Co-Pilot Disabled**\n> {LLM_DISABLED_MESSAGE}"
+                )
+            gr.Markdown(
+                """
+                ## ⚙️ Backend Components Unavailable
+
+                The interactive clinical navigator requires the PyTorch-based model stack, but PyTorch was not found in this environment.
+
+                * Install PyTorch and the project dependencies to enable full functionality.
+                * Once dependencies are available, restart the application.
+
+                The interface is running in read-only mode so you can review configuration options, but model-driven features are disabled.
+                """
+            )
+            return demo
+
     # Initialize models
     print("Preparing inference models... (online training stays paused until started from the UI)")
     inference_engine, cds = load_models_and_initialize()
@@ -527,6 +654,10 @@ def create_gradio_interface():
         theme=gr.themes.Soft(primary_hue="indigo", secondary_hue="blue", neutral_hue="slate"),
         css=CUSTOM_CSS,
     ) as demo:
+        if not LLM_STACK_AVAILABLE:
+            gr.Markdown(
+                f"> ⚠️ **LLM Co-Pilot Disabled**\n> {LLM_DISABLED_MESSAGE}"
+            )
         gr.Markdown("""
         # 🏥 Real-time Interactive Clinical Navigator
 
