@@ -973,7 +973,25 @@ class OnlineTrainer:
             self.use_bcq = True
             print(f"✓ Using baseline algo={algo_choice} for online learning")
 
-        self.base_tau = 0.15 if self.use_bcq else 0.1        
+        self.base_tau = 0.15 if self.use_bcq else 0.1
+        # Keep track of expected dimensions for robust sanitization of streaming data
+        self.state_dim = getattr(self.dynamics_model, 'state_dim', None)
+        if self.state_dim is None and getattr(self.q_ensemble, 'q_networks', None):
+            try:
+                self.state_dim = getattr(self.q_ensemble.q_networks[0], 'state_dim', None)
+            except Exception:
+                self.state_dim = None
+
+        self.action_dim = getattr(self.dynamics_model, 'action_dim', None)
+        if self.action_dim is None and getattr(self.q_ensemble, 'q_networks', None):
+            try:
+                self.action_dim = getattr(self.q_ensemble.q_networks[0], 'action_dim', None)
+            except Exception:
+                self.action_dim = None
+
+        self._last_sanitization_log = 0.0
+        self._sanitization_events = 0
+
         # Buffers
         self.labeled_buffer = deque(maxlen=10000)
         self.weak_buffer = deque(maxlen=50000)
@@ -1100,7 +1118,7 @@ class OnlineTrainer:
     def _update_ema(self, model_name: str, model: nn.Module):
         """按照论文实现EMA: θ̄_{t+1} = α θ̄_t + (1-α) θ_{t+1}, α = 0.99"""
         alpha = 0.99  # 论文中明确提到的α值
-        
+
         for param_name, param in model.named_parameters():
             if param.requires_grad and param_name in self.ema_params[model_name]:
                 # EMA更新公式
@@ -1108,6 +1126,124 @@ class OnlineTrainer:
                     alpha * self.ema_params[model_name][param_name] +
                     (1 - alpha) * param.data
                 )
+
+    def _log_sanitization(self, message: str):
+        """Rate-limited logging for data sanitization events."""
+        self._sanitization_events += 1
+        now = time.time()
+        if now - self._last_sanitization_log > 5.0:
+            print(f"[SANITIZER] {message} (total events: {self._sanitization_events})")
+            self._last_sanitization_log = now
+
+    def _sanitize_vector(self, vector, target_dim: Optional[int], field_name: str) -> np.ndarray:
+        """Coerce incoming vectors to the expected dimensionality with graceful fallbacks."""
+        changed = False
+        original_len = None
+
+        if isinstance(vector, torch.Tensor):
+            vector = vector.detach().cpu().numpy()
+
+        if vector is None:
+            original_len = 0
+            if target_dim and target_dim > 0:
+                arr = np.zeros(target_dim, dtype=np.float32)
+            else:
+                arr = np.zeros(1, dtype=np.float32)
+            changed = True
+        else:
+            try:
+                arr = np.asarray(vector, dtype=np.float32).reshape(-1)
+                original_len = arr.size
+            except Exception:
+                target = target_dim or 1
+                arr = np.zeros(target, dtype=np.float32)
+                original_len = 0
+                changed = True
+
+        if not np.all(np.isfinite(arr)):
+            arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+            changed = True
+
+        effective_target = target_dim if target_dim and target_dim > 0 else arr.size
+
+        if effective_target and arr.size != effective_target:
+            if arr.size < effective_target:
+                arr = np.pad(arr, (0, effective_target - arr.size), mode='constant')
+            else:
+                arr = arr[:effective_target]
+            changed = True
+
+        if changed:
+            self._log_sanitization(
+                f"{field_name}: coerced length {original_len} -> {arr.size}"
+            )
+
+        return arr.astype(np.float32, copy=False)
+
+    def _sanitize_action(self, action) -> int:
+        """Ensure actions are integers within the supported range."""
+        original_action = action
+        try:
+            if isinstance(action, (list, tuple, np.ndarray)):
+                action = np.asarray(action).reshape(-1)[0]
+            action = int(action)
+        except Exception:
+            action = 0
+
+        if self.action_dim is not None:
+            if action < 0 or action >= self.action_dim:
+                clipped = int(np.clip(action, 0, self.action_dim - 1))
+                self._log_sanitization(
+                    f"action: clipped out-of-range value {original_action} -> {clipped}"
+                )
+                action = clipped
+
+        return action
+
+    def _sanitize_reward(self, reward) -> float:
+        """Coerce rewards to finite float values."""
+        try:
+            if isinstance(reward, (list, tuple, np.ndarray)):
+                reward = np.asarray(reward).reshape(-1)[0]
+            reward = float(reward)
+        except Exception:
+            reward = 0.0
+
+        if not np.isfinite(reward):
+            self._log_sanitization("reward: replaced non-finite value with 0.0")
+            reward = 0.0
+
+        return reward
+
+    def _sanitize_transition(self, transition: Optional[Dict], context: str = 'stream') -> Dict:
+        """Return a safe-to-use transition dict with correct dimensions."""
+        base = transition if isinstance(transition, dict) else {}
+        if base is transition:
+            sanitized = dict(base)
+        else:
+            try:
+                sanitized = dict(base)
+            except Exception:
+                sanitized = {}
+
+        state_dim = self.state_dim
+        sanitized_state = self._sanitize_vector(
+            sanitized.get('state'), state_dim, f'{context}.state'
+        )
+        sanitized_next_state = self._sanitize_vector(
+            sanitized.get('next_state', sanitized_state), state_dim, f'{context}.next_state'
+        )
+
+        sanitized_action = self._sanitize_action(sanitized.get('action', 0))
+        sanitized_reward = self._sanitize_reward(sanitized.get('reward', 0.0))
+
+        sanitized['state'] = sanitized_state
+        sanitized['next_state'] = sanitized_next_state
+        sanitized['action'] = sanitized_action
+        sanitized['reward'] = sanitized_reward
+        sanitized['done'] = bool(sanitized.get('done', False))
+
+        return sanitized
     
     def process_transition(self, transition: Dict) -> str:
         """
@@ -1122,10 +1258,13 @@ class OnlineTrainer:
             transition['action'] = transition['action'].cpu().numpy().item()
         if isinstance(transition['reward'], torch.Tensor):
             transition['reward'] = transition['reward'].cpu().numpy().item()
-        
+
+        # 1.5 Sanitize transition to guard against schema mismatches or invalid values
+        transition = self._sanitize_transition(transition, context='stream')
+
         # 2. Update counters and monitor distribution shift (FIX APPLIED)
         self.stats['total_transitions'] += 1
-        
+
         # Add the current state to the distribution shift detector
         self.shift_detector.add_state(transition['state'])
         
@@ -1155,9 +1294,12 @@ class OnlineTrainer:
             return 'queried'
             
         elif decision == 'query_batch':
-            self.query_buffer.extend(batch)
-            self.stats['total_queries'] += len(batch)
-            return f'queried_batch_{len(batch)}'
+            sanitized_batch = [
+                self._sanitize_transition(item, context='query_batch') for item in (batch or [])
+            ]
+            self.query_buffer.extend(sanitized_batch)
+            self.stats['total_queries'] += len(sanitized_batch)
+            return f'queried_batch_{len(sanitized_batch)}'
             
         elif decision == 'weak':
             self.weak_buffer.append(transition)
@@ -1201,9 +1343,10 @@ class OnlineTrainer:
 
     def add_labeled_transition(self, transition: Dict, source: str = 'expert'):
         """Add expert-labeled transition"""
-        transition['label_source'] = source
-        transition['label_time'] = time.time()
-        self.labeled_buffer.append(transition)
+        sanitized = self._sanitize_transition(transition, context='labeled')
+        sanitized['label_source'] = source
+        sanitized['label_time'] = time.time()
+        self.labeled_buffer.append(sanitized)
     
     def _training_loop(self):
         """Background training loop with mixed blocking/non-blocking approach."""
@@ -1251,13 +1394,24 @@ class OnlineTrainer:
 
         # Sample batch
         indices = np.random.choice(len(self.labeled_buffer), actual_batch_size, replace=True)
-        batch = [self.labeled_buffer[i] for i in indices]
+        batch = []
+        for idx in indices:
+            sanitized = self._sanitize_transition(self.labeled_buffer[idx], context='train')
+            try:
+                self.labeled_buffer[idx] = sanitized
+            except Exception:
+                pass
+            batch.append(sanitized)
 
-        # Convert to tensors
-        states = torch.stack([torch.FloatTensor(t['state']) for t in batch]).to(self.device)
-        actions = torch.LongTensor([t['action'] for t in batch]).to(self.device)
-        rewards = torch.FloatTensor([t['reward'] for t in batch]).to(self.device)
-        next_states = torch.stack([torch.FloatTensor(t['next_state']) for t in batch]).to(self.device)
+        # Convert to tensors with additional safeguards
+        try:
+            states = torch.stack([torch.FloatTensor(t['state']) for t in batch]).to(self.device)
+            actions = torch.LongTensor([t['action'] for t in batch]).to(self.device)
+            rewards = torch.FloatTensor([t['reward'] for t in batch]).to(self.device)
+            next_states = torch.stack([torch.FloatTensor(t['next_state']) for t in batch]).to(self.device)
+        except RuntimeError as tensor_error:
+            self._log_sanitization(f"batch tensorization failed ({tensor_error}); skipping training step")
+            return
 
         # ----------------- Model Training -----------------
         # Update dynamics model
