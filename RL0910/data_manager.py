@@ -3,6 +3,7 @@ data_manager.py - 管理虚拟数据和真实数据的读取
 """
 
 import os
+import re
 
 # pandas 依赖在部分环境中会尝试加载与 NumPy 不兼容的 pyarrow
 # 可用变量禁用 Arrow backend，避免 _ARRAY_API not found 报错
@@ -10,7 +11,7 @@ os.environ.setdefault("PANDAS_USE_PYARROW_EXTENSION_ARRAY", "0")
 os.environ.setdefault("PANDAS_USE_PYARROW_BACKEND", "0")
 
 import numpy as np
-from typing import Dict, List, Optional, Union, Tuple, Any
+from typing import Dict, List, Optional, Union, Tuple, Any, Set
 from datetime import datetime
 from data import PatientDataGenerator
 import json
@@ -117,6 +118,274 @@ class DataManager:
         meta["training_runs"] = runs
         meta["last_training"] = summary
         self.current_meta = meta
+
+    # ------------------------------------------------------------------
+    # User provided tabular data helpers
+    # ------------------------------------------------------------------
+
+    def _read_user_table(self, file_path: str) -> "pd.DataFrame":
+        """Load a user supplied file into a DataFrame with best effort fallbacks."""
+
+        _, ext = os.path.splitext(file_path)
+        ext = ext.lower()
+        if ext == ".csv":
+            return pd.read_csv(file_path)
+        if ext in {".parquet", ".pq"}:
+            return pd.read_parquet(file_path)
+        if ext in {".xlsx", ".xls"}:
+            return pd.read_excel(file_path)
+        raise ValueError(f"Unsupported file extension: {ext or 'unknown'}")
+
+    def _suggest_column_roles(self, df: "pd.DataFrame") -> Dict[str, Any]:
+        """Infer likely column roles so the UI can pre-populate selectors."""
+
+        suggestions: Dict[str, Any] = {}
+        lowered = {str(col).lower(): str(col) for col in df.columns}
+
+        # Patient identifier
+        for key in ["patient", "subject", "hadm", "icustay", "trajectory"]:
+            for lname, original in lowered.items():
+                if key in lname and "id" in lname:
+                    suggestions["patient_id"] = original
+                    break
+            if suggestions.get("patient_id"):
+                break
+
+        # Timestamp / step column
+        for key in ["timestep", "time", "step", "visit", "frame"]:
+            for lname, original in lowered.items():
+                if key in lname:
+                    suggestions["timestep"] = original
+                    break
+            if suggestions.get("timestep"):
+                break
+
+        # Action / treatment column
+        for key in ["action", "treatment", "intervention", "decision"]:
+            for lname, original in lowered.items():
+                if key in lname:
+                    suggestions["action"] = original
+                    break
+            if suggestions.get("action"):
+                break
+
+        # Reward / outcome column
+        for key in ["reward", "return", "score", "utility", "sofa"]:
+            for lname, original in lowered.items():
+                if key in lname:
+                    suggestions["reward"] = original
+                    break
+            if suggestions.get("reward"):
+                break
+
+        # Terminal indicator
+        for key in ["terminal", "done", "is_terminal", "mortality", "discharge"]:
+            for lname, original in lowered.items():
+                if key in lname:
+                    suggestions["terminal"] = original
+                    break
+            if suggestions.get("terminal"):
+                break
+
+        numeric_cols = df.select_dtypes(include=["number", "bool"]).columns.tolist()
+        protected = {
+            suggestions.get("patient_id"),
+            suggestions.get("timestep"),
+            suggestions.get("action"),
+            suggestions.get("reward"),
+            suggestions.get("terminal"),
+        }
+        suggestions["feature_columns"] = [
+            col for col in numeric_cols if col not in protected and col in df.columns
+        ]
+        suggestions["all_columns"] = list(df.columns)
+        suggestions["numeric_columns"] = numeric_cols
+        return suggestions
+
+    def preview_user_dataset(self, file_path: str, n_rows: int = 5) -> Dict[str, Any]:
+        """Return a lightweight preview plus inferred roles for UI selection."""
+
+        df = self._read_user_table(file_path)
+        preview = (
+            df.head(n_rows)
+            .copy()
+            .astype(object)
+            .where(lambda x: x.notna(), None)
+            .reset_index(drop=True)
+        )
+        suggestions = self._suggest_column_roles(df)
+        dtypes = {str(col): str(df[col].dtype) for col in df.columns}
+        return {
+            "preview": preview,
+            "columns": list(df.columns),
+            "dtypes": dtypes,
+            "suggestions": suggestions,
+        }
+
+    def _sanitize_feature_name(self, name: str, used: Set[str]) -> str:
+        """Convert arbitrary feature names into state_* columns with unique suffixes."""
+
+        base = re.sub(r"[^0-9a-zA-Z]+", "_", str(name)).strip("_").lower() or "feature"
+        base = f"state_{base}"
+        candidate = base
+        suffix = 2
+        while candidate in used:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        used.add(candidate)
+        return candidate
+
+    def load_real_data_user_defined(self,
+                                   file_path: str,
+                                   column_mapping: Optional[Dict[str, Optional[str]]],
+                                   feature_columns: Optional[List[str]] = None) -> "pd.DataFrame":
+        """Normalize a user supplied dataset using explicit column selections."""
+
+        df = self._read_user_table(file_path)
+        column_mapping = dict(column_mapping or {})
+        suggestions = self._suggest_column_roles(df)
+
+        def _resolve(key: str) -> Optional[str]:
+            value = column_mapping.get(key)
+            if value in (None, "", "__auto__"):
+                value = suggestions.get(key)
+            if value and value not in df.columns:
+                return None
+            return value
+
+        patient_col = _resolve("patient_id")
+        timestep_col = _resolve("timestep")
+        action_col = _resolve("action")
+        reward_col = _resolve("reward")
+        terminal_col = _resolve("terminal")
+
+        if not feature_columns:
+            feature_columns = suggestions.get("feature_columns", [])
+        feature_columns = [col for col in feature_columns or [] if col in df.columns]
+
+        working = df.copy()
+
+        if patient_col and patient_col in working.columns:
+            if patient_col != "patient_id":
+                working.rename(columns={patient_col: "patient_id"}, inplace=True)
+        else:
+            working["patient_id"] = [f"R{i:05d}" for i in range(len(working))]
+            patient_col = "patient_id"
+
+        if timestep_col and timestep_col in working.columns:
+            if timestep_col != "timestep":
+                working.rename(columns={timestep_col: "timestep"}, inplace=True)
+        else:
+            working["timestep"] = working.groupby("patient_id").cumcount()
+            timestep_col = "timestep"
+        working["timestep"] = (
+            pd.to_numeric(working["timestep"], errors="coerce")
+            .fillna(0)
+            .astype(int)
+        )
+
+        action_map: Dict[int, str] = {}
+        if action_col and action_col in working.columns:
+            if action_col != "action":
+                working.rename(columns={action_col: "action"}, inplace=True)
+            try:
+                working["action"] = (
+                    pd.to_numeric(working["action"], errors="coerce")
+                    .fillna(-1)
+                    .astype(int)
+                )
+                unique_actions = sorted(set(working["action"].unique()))
+                action_map = {int(a): str(a) for a in unique_actions}
+            except Exception:
+                labels = working["action"].astype(str).fillna("Unknown")
+                categories = sorted(labels.unique())
+                label_to_id = {label: idx for idx, label in enumerate(categories)}
+                working["action"] = labels.map(label_to_id).astype(int)
+                action_map = {idx: label for label, idx in label_to_id.items()}
+        else:
+            working["action"] = -1
+
+        if reward_col and reward_col in working.columns:
+            if reward_col != "reward":
+                working.rename(columns={reward_col: "reward"}, inplace=True)
+        else:
+            working["reward"] = 0.0
+        working["reward"] = pd.to_numeric(working["reward"], errors="coerce").fillna(0.0)
+
+        if terminal_col and terminal_col in working.columns:
+            if terminal_col != "terminal":
+                working.rename(columns={terminal_col: "terminal"}, inplace=True)
+        else:
+            working["terminal"] = (
+                working["patient_id"] != working["patient_id"].shift(-1)
+            ).astype(int)
+        working["terminal"] = (
+            pd.to_numeric(working["terminal"], errors="coerce")
+            .fillna(0)
+            .astype(int)
+        )
+
+        used_feature_names: Set[str] = set(working.columns)
+        feature_alias_map: Dict[str, str] = {}
+        final_feature_cols: List[str] = []
+        for original in feature_columns:
+            if original not in df.columns and original not in working.columns:
+                continue
+            column_name = original
+            if column_name not in working.columns:
+                continue
+            sanitized = self._sanitize_feature_name(original, used_feature_names)
+            if sanitized != column_name:
+                working.rename(columns={column_name: sanitized}, inplace=True)
+            feature_alias_map[sanitized] = str(original)
+            final_feature_cols.append(sanitized)
+
+        if not final_feature_cols:
+            auto_cols = suggestions.get("feature_columns", [])
+            for original in auto_cols:
+                if original not in working.columns:
+                    continue
+                sanitized = self._sanitize_feature_name(original, used_feature_names)
+                if sanitized != original:
+                    working.rename(columns={original: sanitized}, inplace=True)
+                feature_alias_map[sanitized] = str(original)
+                final_feature_cols.append(sanitized)
+
+        if final_feature_cols:
+            working[final_feature_cols] = (
+                working[final_feature_cols]
+                .apply(pd.to_numeric, errors="coerce")
+                .astype(np.float32)
+            )
+
+        meta = {
+            "feature_columns": final_feature_cols,
+            "feature_original_columns": [feature_alias_map.get(col, col) for col in final_feature_cols],
+            "action_names": list(action_map.values()) if action_map else None,
+            "action_map": action_map if action_map else None,
+            "mapping": {
+                "patient_id": patient_col,
+                "timestep": timestep_col,
+                "action": action_col,
+                "reward": reward_col,
+                "terminal": terminal_col,
+                "features": [feature_alias_map.get(col, col) for col in final_feature_cols],
+            },
+            "data_type": "user_tabular",
+        }
+
+        self.real_data = working
+        self.current_source = "real"
+        self.real_data_path = file_path
+        self.current_meta = meta
+        self.current_schema = {}
+        self._update_feature_metadata(working, final_feature_cols)
+
+        print(
+            "[DataManager] User-defined real data loaded: "
+            f"{len(working)} rows, {working['patient_id'].nunique()} patients, {len(final_feature_cols)} features."
+        )
+        return working
 
     def generate_virtual_data(self, n_patients: int = 1000, seed: int = 42) -> pd.DataFrame:
         """生成虚拟数据"""
