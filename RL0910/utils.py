@@ -9,7 +9,7 @@ import numpy as np
 from pandas_compat import get_pandas
 pd = get_pandas()
 import torch
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union, Any
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import mean_squared_error, mean_absolute_error
@@ -98,15 +98,15 @@ def evaluate_calibration(
     predicted_outcomes: np.ndarray,
     actual_outcomes: np.ndarray,
     n_bins: int = 10
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """
     Evaluate calibration of outcome predictions
-    
+
     Args:
         predicted_outcomes: Predicted outcomes
         actual_outcomes: Actual observed outcomes
         n_bins: Number of bins for calibration
-        
+
     Returns:
         Dictionary with calibration metrics
     """
@@ -114,7 +114,7 @@ def evaluate_calibration(
     bin_edges = np.percentile(predicted_outcomes, np.linspace(0, 100, n_bins + 1))
     bin_indices = np.digitize(predicted_outcomes, bin_edges) - 1
     bin_indices = np.clip(bin_indices, 0, n_bins - 1)
-    
+
     # Compute calibration statistics
     calibration_data = []
     for i in range(n_bins):
@@ -128,64 +128,90 @@ def evaluate_calibration(
                 'mean_actual': mean_actual,
                 'count': mask.sum()
             })
-    
+
     calibration_df = pd.DataFrame(calibration_data)
-    
+    if calibration_df.empty:
+        calibration_df = pd.DataFrame(
+            columns=["bin", "mean_predicted", "mean_actual", "count", "ece", "mce"]
+        )
+
     # Expected Calibration Error (ECE)
     ece = 0.0
-    for _, row in calibration_df.iterrows():
-        weight = row['count'] / len(predicted_outcomes)
-        ece += weight * abs(row['mean_predicted'] - row['mean_actual'])
-    
+    if not calibration_df.empty:
+        for _, row in calibration_df.iterrows():
+            weight = row['count'] / len(predicted_outcomes)
+            ece += weight * abs(row['mean_predicted'] - row['mean_actual'])
+
     # Maximum Calibration Error (MCE)
-    mce = (calibration_df['mean_predicted'] - calibration_df['mean_actual']).abs().max()
-    
+    if not calibration_df.empty:
+        mce = (calibration_df['mean_predicted'] - calibration_df['mean_actual']).abs().max()
+    else:
+        mce = np.nan
+
+    if not calibration_df.empty:
+        calibration_df['ece'] = ece
+        calibration_df['mce'] = mce
+
     return {
-        'ece': ece,
-        'mce': mce,
+        'ece': float(ece),
+        'mce': float(mce) if not np.isnan(mce) else np.nan,
         'calibration_data': calibration_df
     }
 
 
 def plot_calibration_curve(
-    calibration_data: pd.DataFrame,
+    calibration_result: Union[pd.DataFrame, Dict[str, Any]],
     save_path: Optional[str] = None
 ):
     """Plot calibration curve"""
-    
+
+    if isinstance(calibration_result, dict):
+        calibration_data = calibration_result.get('calibration_data', pd.DataFrame())
+        ece_value = calibration_result.get('ece', np.nan)
+    else:
+        calibration_data = calibration_result
+        if 'ece' in calibration_data.columns and not calibration_data['ece'].empty:
+            ece_value = float(calibration_data['ece'].iloc[0])
+        else:
+            ece_value = np.nan
+
     plt.figure(figsize=(8, 8))
-    
+
     # Perfect calibration line
     plt.plot([0, 1], [0, 1], 'k--', label='Perfect Calibration')
-    
-    # Actual calibration
-    plt.scatter(calibration_data['mean_predicted'], 
-               calibration_data['mean_actual'],
-               s=calibration_data['count'] * 5,  # Size by count
-               alpha=0.7,
-               label='Model Calibration')
-    
-    # Connect points
-    plt.plot(calibration_data['mean_predicted'], 
-            calibration_data['mean_actual'],
-            'b-', alpha=0.5)
-    
+
+    if calibration_data.empty:
+        plt.text(0.5, 0.5, '无有效校准数据', ha='center', va='center', fontsize=12)
+    else:
+        # Actual calibration
+        plt.scatter(calibration_data['mean_predicted'],
+                   calibration_data['mean_actual'],
+                   s=calibration_data['count'] * 5,  # Size by count
+                   alpha=0.7,
+                   label='Model Calibration')
+
+        # Connect points
+        plt.plot(calibration_data['mean_predicted'],
+                calibration_data['mean_actual'],
+                'b-', alpha=0.5)
+
     plt.xlabel('Mean Predicted Outcome', fontsize=12)
     plt.ylabel('Mean Actual Outcome', fontsize=12)
     plt.title('Calibration Plot', fontsize=14)
-    plt.legend()
+    if not calibration_data.empty:
+        plt.legend()
     plt.grid(True, alpha=0.3)
-    
-    # Add text with ECE
-    plt.text(0.05, 0.95, f"ECE: {calibration_data['ece'].iloc[0]:.3f}",
-             transform=plt.gca().transAxes,
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
+
+    if not np.isnan(ece_value):
+        plt.text(0.05, 0.95, f"ECE: {ece_value:.3f}",
+                 transform=plt.gca().transAxes,
+                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
     else:
         plt.show()
-    
+
     plt.close()
 
 

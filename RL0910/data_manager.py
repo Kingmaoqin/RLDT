@@ -357,26 +357,50 @@ class DataManager:
             df["timestep"] = df.groupby("patient_id").cumcount()
         else:
             df.rename(columns={t_col: "timestep"}, inplace=True)
+        df["timestep"] = (
+            pd.to_numeric(df["timestep"], errors="coerce")
+            .fillna(0)
+            .astype(int)
+        )
 
         # 3) action / reward / terminal
         if "action" not in df.columns:
             for c in ["action_id", "treatment_id", "act"]:
                 if c in df.columns:
-                    df.rename(columns={c: "action"}, inplace=True); break
+                    df.rename(columns={c: "action"}, inplace=True)
+                    break
+        if "action" not in df.columns:
+            df["action"] = -1
+        df["action"] = (
+            pd.to_numeric(df["action"], errors="coerce")
+            .fillna(-1)
+            .astype(int)
+        )
+
         if "reward" not in df.columns:
             for c in ["r", "return", "sofa_delta"]:
                 if c in df.columns:
-                    df.rename(columns={c: "reward"}, inplace=True); break
-            if "reward" not in df.columns:
-                df["reward"] = 0.0
+                    df.rename(columns={c: "reward"}, inplace=True)
+                    break
+        if "reward" not in df.columns:
+            df["reward"] = 0.0
+        df["reward"] = pd.to_numeric(df["reward"], errors="coerce").fillna(0.0)
 
         if "terminal" not in df.columns:
             for c in ["done", "is_terminal", "terminal_flag"]:
                 if c in df.columns:
-                    df.rename(columns={c: "terminal"}, inplace=True); break
-            if "terminal" not in df.columns:
-                # 每个病人最后一条视为终止
-                df["terminal"] = (df["patient_id"] != df["patient_id"].shift(-1)).astype(int)
+                    df.rename(columns={c: "terminal"}, inplace=True)
+                    break
+        if "terminal" not in df.columns:
+            # 每个病人最后一条视为终止
+            df["terminal"] = (
+                df["patient_id"] != df["patient_id"].shift(-1)
+            ).astype(int)
+        df["terminal"] = (
+            pd.to_numeric(df["terminal"], errors="coerce")
+            .fillna(0)
+            .astype(int)
+        )
 
         # 4) 特征列：优先 state_* 前缀；否则选数值列中排除关键列
         feature_cols = [c for c in df.columns if c.startswith("state_")]
@@ -391,6 +415,13 @@ class DataManager:
                 new_names[c] = f"state_{str(c).strip().replace(' ','_').lower()}"
             df.rename(columns=new_names, inplace=True)
             feature_cols = [new_names[c] for c in feature_cols]
+
+        if feature_cols:
+            df[feature_cols] = (
+                df[feature_cols]
+                .apply(pd.to_numeric, errors="coerce")
+                .astype(np.float32)
+            )
 
         # 5) 更新管理器缓存与 meta
         unique_actions = (
@@ -550,39 +581,60 @@ class DataManager:
         return trajectory
     
     def get_cohort_statistics(self, filter_criteria: Optional[Dict] = None) -> Dict:
-        """获取队列统计信息"""
-        data = self.get_current_data()
-        
+        """获取队列统计信息，容错处理缺失或异常列"""
+
+        data = self.get_current_data().copy()
+
         # 应用过滤条件
         if filter_criteria:
             for key, value in filter_criteria.items():
                 if key in data.columns:
                     data = data[data[key] == value]
-        
-        # 计算统计信息
+
+        total_records = int(len(data))
+        total_patients = int(data['patient_id'].nunique()) if 'patient_id' in data.columns else 0
+
+        avg_traj_len = 0.0
+        if 'patient_id' in data.columns and not data.empty:
+            mean_val = data.groupby('patient_id').size().mean()
+            avg_traj_len = float(mean_val) if pd.notna(mean_val) else 0.0
+
+        action_distribution: Dict[str, int] = {}
+        if 'action' in data.columns:
+            counts = data['action'].value_counts(dropna=False)
+            action_distribution = {str(k): int(v) for k, v in counts.to_dict().items()}
+
+        avg_reward = 0.0
+        if 'reward' in data.columns:
+            reward_series = pd.to_numeric(data['reward'], errors='coerce')
+            if reward_series.notna().any():
+                avg_reward = float(reward_series.mean())
+
         stats = {
-            'total_patients': data['patient_id'].nunique(),
-            'total_records': len(data),
-            'avg_trajectory_length': data.groupby('patient_id').size().mean(),
-                'action_distribution': {
-        str(k): int(v) 
-        for k, v in data['action'].value_counts().to_dict().items()
-    },
-            'avg_reward': data['reward'].mean(),
-            'feature_stats': {}
+            'total_patients': total_patients,
+            'total_records': total_records,
+            'avg_trajectory_length': avg_traj_len,
+            'action_distribution': action_distribution,
+            'avg_reward': avg_reward,
+            'feature_stats': {},
         }
-        
+
         # 计算特征统计
-        feature_columns = [col for col in data.columns if col.startswith('state_') and not col.startswith('next_state_')]
+        feature_columns = [
+            col for col in data.columns
+            if col.startswith('state_') and not col.startswith('next_state_')
+        ]
         for col in feature_columns:
             feature_name = col.replace('state_', '')
-            stats['feature_stats'][feature_name] = {
-                'mean': float(data[col].mean()),
-                'std': float(data[col].std()),
-                'min': float(data[col].min()),
-                'max': float(data[col].max())
-            }
-        
+            series = pd.to_numeric(data[col], errors='coerce')
+            if series.notna().any():
+                stats['feature_stats'][feature_name] = {
+                    'mean': float(series.mean()),
+                    'std': float(series.std()),
+                    'min': float(series.min()),
+                    'max': float(series.max()),
+                }
+
         return stats
     
     def export_patient_data(self, patient_id: str, output_path: str):

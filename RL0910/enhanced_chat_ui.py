@@ -198,6 +198,7 @@ DATA_STAGE_PROMPT_VIRTUAL = (
 DATA_STAGE_PROMPT_REAL = (
     "### 📁 Ready to Load\n"
     "- Upload your dataset (and optional schema) then press **Load Real Data**.\n"
+    "- Ensure patient/time/action/reward columns are present so trajectories can be reconstructed.\n"
     "- Downstream panels remain hidden until loading finishes."
 )
 
@@ -582,12 +583,20 @@ def create_gradio_interface():
 
                         # Real data options
                         with gr.Column(visible=False) as real_data_options:
+                            gr.Markdown(
+                                "#### 📥 Upload Checklist\n"
+                                "\n"
+                                "- **Required trajectory columns**: 每条记录需包含患者标识（`patient_id`/`subject_id` 等）、时间步（`timestep`/`time`）、动作（`action`）及奖励（`reward`），缺失时系统会兜底但建议提前准备。\n"
+                                "- **Episode boundary**: 如果没有 `terminal` 列，系统会自动将同一患者的最后一行视为终止。\n"
+                                "- **Feature values**: 数值特征可使用 `state_*` 前缀；否则我们会在加载时自动转换并补齐。\n"
+                                "- **File format**: 支持 CSV、Parquet、Excel；如有 YAML Schema，可一并上传以绑定指标含义。"
+                            )
                             with gr.Row():
                                 file_upload = gr.File(label="Upload Data File", file_types=[".csv", ".parquet", ".xlsx", ".xls"])
                                 schema_upload = gr.File(label="Upload Schema YAML (optional but recommended)", file_types=[".yaml", ".yml"])
                                 load_real_btn = _register_button_with_help(
                                     "Load Real Data",
-                                    "Load the uploaded dataset (and optional schema) into the system and unlock the explorer.",
+                                    "Load the uploaded dataset (with optional schema). Expect patient/time/action/reward columns so the pipeline can rebuild trajectories.",
                                     variant="primary",
                                 )
 
