@@ -593,12 +593,74 @@ def create_gradio_interface():
                             )
                             with gr.Row():
                                 file_upload = gr.File(label="Upload Data File", file_types=[".csv", ".parquet", ".xlsx", ".xls"])
-                                schema_upload = gr.File(label="Upload Schema YAML (optional but recommended)", file_types=[".yaml", ".yml"])
+                                schema_upload = gr.File(label="Upload Schema YAML (optional)", file_types=[".yaml", ".yml"])
                                 load_real_btn = _register_button_with_help(
                                     "Load Real Data",
                                     "Load the uploaded dataset (with optional schema). Expect patient/time/action/reward columns so the pipeline can rebuild trajectories.",
                                     variant="primary",
+                                    interactive=False,
                                 )
+
+                            column_mapping_intro = gr.Markdown(
+                                "#### 🔍 Inspect & Map Columns\n"
+                                "1. 上传后系统会给出前 5 行数据预览与自动建议。\n"
+                                "2. 如需调整，请在下方选择对应列。未选择时会回退到自动识别。\n"
+                                "3. 多选框用于指定特征列，至少保留一个数值特征用于训练。",
+                                visible=False,
+                            )
+                            upload_preview_table = gr.Dataframe(
+                                headers=None,
+                                label="First 5 rows",
+                                interactive=False,
+                                visible=False,
+                            )
+                            column_summary = gr.Markdown(visible=False)
+                            with gr.Row():
+                                patient_column_dropdown = gr.Dropdown(
+                                    choices=[],
+                                    value=None,
+                                    label="Patient identifier column",
+                                    info="Select the column that groups records into patient trajectories",
+                                    visible=False,
+                                )
+                                timestep_column_dropdown = gr.Dropdown(
+                                    choices=[],
+                                    value=None,
+                                    label="Timestep column",
+                                    info="Ordered index for transitions within each patient",
+                                    visible=False,
+                                )
+                            with gr.Row():
+                                action_column_dropdown = gr.Dropdown(
+                                    choices=[],
+                                    value=None,
+                                    label="Action column",
+                                    info="Policy decisions or treatments applied at each step",
+                                    visible=False,
+                                )
+                                reward_column_dropdown = gr.Dropdown(
+                                    choices=[],
+                                    value=None,
+                                    label="Reward column",
+                                    info="Outcome signal for each transition",
+                                    visible=False,
+                                )
+                            terminal_column_dropdown = gr.Dropdown(
+                                choices=[],
+                                value=None,
+                                label="Terminal flag (optional)",
+                                info="Mark episode completion if available; leave blank to infer automatically",
+                                visible=False,
+                            )
+                            feature_column_select = gr.Dropdown(
+                                choices=[],
+                                value=None,
+                                multiselect=True,
+                                label="Feature columns",
+                                info="Numeric patient descriptors that form the model state",
+                                visible=False,
+                            )
+                            column_suggestions_state = gr.State({})
 
 
 
@@ -1708,6 +1770,89 @@ def create_gradio_interface():
                 gr.update(value=DATA_STAGE_DEFAULT),
             )
                 
+        def inspect_uploaded_file(file):
+            if file is None:
+                reset_dropdown = gr.update(choices=[], value=None, visible=False, interactive=False)
+                return (
+                    gr.update(visible=False),
+                    gr.update(value=None, visible=False),
+                    gr.update(value="", visible=False),
+                    reset_dropdown,
+                    reset_dropdown,
+                    reset_dropdown,
+                    reset_dropdown,
+                    reset_dropdown,
+                    gr.update(choices=[], value=None, visible=False, interactive=False),
+                    gr.update(interactive=False),
+                    {},
+                )
+
+            try:
+                info = data_manager.preview_user_dataset(file.name, n_rows=5)
+            except Exception as e:
+                message = f"❌ Preview failed: {e}"
+                reset_dropdown = gr.update(choices=[], value=None, visible=False, interactive=False)
+                return (
+                    gr.update(visible=True),
+                    gr.update(value=None, visible=False),
+                    gr.update(value=message, visible=True),
+                    reset_dropdown,
+                    reset_dropdown,
+                    reset_dropdown,
+                    reset_dropdown,
+                    reset_dropdown,
+                    gr.update(choices=[], value=None, visible=False, interactive=False),
+                    gr.update(interactive=False),
+                    {},
+                )
+
+            preview_df = info.get("preview")
+            suggestions = info.get("suggestions", {})
+            columns = info.get("columns", [])
+            dtypes = info.get("dtypes", {})
+
+            dtype_lines = [f"- **{col}** · `{dtype}`" for col, dtype in list(dtypes.items())[:18]]
+            suggestion_lines = []
+            label_map = {
+                "patient_id": "Patient ID",
+                "timestep": "Timestep",
+                "action": "Action",
+                "reward": "Reward",
+                "terminal": "Terminal",
+            }
+            for key, label in label_map.items():
+                val = suggestions.get(key)
+                if val:
+                    suggestion_lines.append(f"- {label}: `{val}`")
+            feature_suggestion = suggestions.get("feature_columns") or []
+            if feature_suggestion:
+                suggestion_lines.append(f"- Features: {len(feature_suggestion)} column(s)")
+
+            summary_text = "\n".join([
+                "**Detected column types**:",
+                *dtype_lines,
+                "",
+                "**Auto-mapped fields**:",
+                *(suggestion_lines or ["- Not enough signals – please map manually."]),
+            ])
+
+            dropdown_kwargs = dict(choices=columns, visible=True, interactive=True)
+            feature_value = feature_suggestion if feature_suggestion else []
+
+            return (
+                gr.update(visible=True),
+                gr.update(value=preview_df, headers=list(preview_df.columns), visible=True),
+                gr.update(value=summary_text, visible=True),
+                gr.update(value=suggestions.get("patient_id"), **dropdown_kwargs),
+                gr.update(value=suggestions.get("timestep"), **dropdown_kwargs),
+                gr.update(value=suggestions.get("action"), **dropdown_kwargs),
+                gr.update(value=suggestions.get("reward"), **dropdown_kwargs),
+                gr.update(value=suggestions.get("terminal"), **dropdown_kwargs),
+                gr.update(value=feature_value, choices=columns, visible=True, interactive=True),
+                gr.update(interactive=True),
+                suggestions,
+            )
+
         def generate_virtual_data(n_patients):
             from drive_tools import load_data_source, get_cohort_stats, get_action_legend_html
             try:
@@ -1765,7 +1910,9 @@ def create_gradio_interface():
                 )
 
 
-        def load_real_data(file, schema_file):
+        def load_real_data(file, schema_file,
+                           patient_col, timestep_col, action_col, reward_col,
+                           terminal_col, feature_cols, suggestions):
             from drive_tools import load_data_source, get_cohort_stats, get_action_legend_html
             try:
                 if file is None:
@@ -1783,8 +1930,29 @@ def create_gradio_interface():
                         gr.update(value=DATA_STAGE_DEFAULT),
                     )
 
+                suggestions = suggestions or {}
+                feature_cols = feature_cols or suggestions.get("feature_columns") or []
+                if isinstance(feature_cols, str):
+                    feature_cols = [feature_cols]
+
+                raw_mapping = {
+                    "patient_id": patient_col,
+                    "timestep": timestep_col,
+                    "action": action_col,
+                    "reward": reward_col,
+                    "terminal": terminal_col,
+                }
+                user_selected = any(v for v in raw_mapping.values()) or bool(feature_cols)
                 schema_path = schema_file.name if schema_file else None
-                res = load_data_source("real", file_path=file.name, schema_path=schema_path)
+                use_user_mapping = schema_path is None or user_selected
+
+                res = load_data_source(
+                    "real",
+                    file_path=file.name,
+                    column_mapping=raw_mapping if use_user_mapping else None,
+                    feature_columns=feature_cols if use_user_mapping else None,
+                    schema_path=None if use_user_mapping else schema_path,
+                )
                 if isinstance(res, dict) and res.get("error"):
                     raise ValueError(res["error"])
 
@@ -2253,9 +2421,37 @@ def create_gradio_interface():
         )
 
 
+        file_upload.change(
+            fn=inspect_uploaded_file,
+            inputs=[file_upload],
+            outputs=[
+                column_mapping_intro,
+                upload_preview_table,
+                column_summary,
+                patient_column_dropdown,
+                timestep_column_dropdown,
+                action_column_dropdown,
+                reward_column_dropdown,
+                terminal_column_dropdown,
+                feature_column_select,
+                load_real_btn,
+                column_suggestions_state,
+            ]
+        )
+
         load_real_btn.click(
             fn=load_real_data,
-            inputs=[file_upload, schema_upload],
+            inputs=[
+                file_upload,
+                schema_upload,
+                patient_column_dropdown,
+                timestep_column_dropdown,
+                action_column_dropdown,
+                reward_column_dropdown,
+                terminal_column_dropdown,
+                feature_column_select,
+                column_suggestions_state,
+            ],
             outputs=[
                 current_source_text,
                 dataset_overview_section,

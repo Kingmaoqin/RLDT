@@ -5,7 +5,7 @@ online_loop.py - Online incremental training loop with active learning
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Dict, List, Optional, Callable, Tuple
+from typing import Any, Dict, List, Optional, Callable, Tuple
 from collections import deque
 import time
 import os
@@ -17,6 +17,7 @@ from threading import Lock
 from typing import Callable
 from datetime import datetime
 import random
+from uuid import uuid4
 from models import TransformerDynamicsModel, TreatmentOutcomeModel, ConservativeQNetwork, EnsembleQNetwork
 from training import ConservativeQLearning, DigitalTwinTrainer, OutcomeModelTrainer
 from samplers import StreamActiveLearner
@@ -973,7 +974,25 @@ class OnlineTrainer:
             self.use_bcq = True
             print(f"✓ Using baseline algo={algo_choice} for online learning")
 
-        self.base_tau = 0.15 if self.use_bcq else 0.1        
+        self.base_tau = 0.15 if self.use_bcq else 0.1
+        # Keep track of expected dimensions for robust sanitization of streaming data
+        self.state_dim = getattr(self.dynamics_model, 'state_dim', None)
+        if self.state_dim is None and getattr(self.q_ensemble, 'q_networks', None):
+            try:
+                self.state_dim = getattr(self.q_ensemble.q_networks[0], 'state_dim', None)
+            except Exception:
+                self.state_dim = None
+
+        self.action_dim = getattr(self.dynamics_model, 'action_dim', None)
+        if self.action_dim is None and getattr(self.q_ensemble, 'q_networks', None):
+            try:
+                self.action_dim = getattr(self.q_ensemble.q_networks[0], 'action_dim', None)
+            except Exception:
+                self.action_dim = None
+
+        self._last_sanitization_log = 0.0
+        self._sanitization_events = 0
+
         # Buffers
         self.labeled_buffer = deque(maxlen=10000)
         self.weak_buffer = deque(maxlen=50000)
@@ -1100,7 +1119,7 @@ class OnlineTrainer:
     def _update_ema(self, model_name: str, model: nn.Module):
         """按照论文实现EMA: θ̄_{t+1} = α θ̄_t + (1-α) θ_{t+1}, α = 0.99"""
         alpha = 0.99  # 论文中明确提到的α值
-        
+
         for param_name, param in model.named_parameters():
             if param.requires_grad and param_name in self.ema_params[model_name]:
                 # EMA更新公式
@@ -1108,11 +1127,139 @@ class OnlineTrainer:
                     alpha * self.ema_params[model_name][param_name] +
                     (1 - alpha) * param.data
                 )
+
+    def _log_sanitization(self, message: str):
+        """Rate-limited logging for data sanitization events."""
+        self._sanitization_events += 1
+        now = time.time()
+        if now - self._last_sanitization_log > 5.0:
+            print(f"[SANITIZER] {message} (total events: {self._sanitization_events})")
+            self._last_sanitization_log = now
+
+    def _sanitize_vector(self, vector, target_dim: Optional[int], field_name: str) -> np.ndarray:
+        """Coerce incoming vectors to the expected dimensionality with graceful fallbacks."""
+        changed = False
+        original_len = None
+
+        if isinstance(vector, torch.Tensor):
+            vector = vector.detach().cpu().numpy()
+
+        if vector is None:
+            original_len = 0
+            if target_dim and target_dim > 0:
+                arr = np.zeros(target_dim, dtype=np.float32)
+            else:
+                arr = np.zeros(1, dtype=np.float32)
+            changed = True
+        else:
+            try:
+                arr = np.asarray(vector, dtype=np.float32).reshape(-1)
+                original_len = arr.size
+            except Exception:
+                target = target_dim or 1
+                arr = np.zeros(target, dtype=np.float32)
+                original_len = 0
+                changed = True
+
+        if not np.all(np.isfinite(arr)):
+            arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+            changed = True
+
+        effective_target = target_dim if target_dim and target_dim > 0 else arr.size
+
+        if effective_target and arr.size != effective_target:
+            if arr.size < effective_target:
+                arr = np.pad(arr, (0, effective_target - arr.size), mode='constant')
+            else:
+                arr = arr[:effective_target]
+            changed = True
+
+        if changed:
+            self._log_sanitization(
+                f"{field_name}: coerced length {original_len} -> {arr.size}"
+            )
+
+        return arr.astype(np.float32, copy=False)
+
+    def _sanitize_action(self, action) -> int:
+        """Ensure actions are integers within the supported range."""
+        original_action = action
+        try:
+            if isinstance(action, (list, tuple, np.ndarray)):
+                action = np.asarray(action).reshape(-1)[0]
+            action = int(action)
+        except Exception:
+            action = 0
+
+        if self.action_dim is not None:
+            if action < 0 or action >= self.action_dim:
+                clipped = int(np.clip(action, 0, self.action_dim - 1))
+                self._log_sanitization(
+                    f"action: clipped out-of-range value {original_action} -> {clipped}"
+                )
+                action = clipped
+
+        return action
+
+    def _sanitize_reward(self, reward) -> float:
+        """Coerce rewards to finite float values."""
+        try:
+            if isinstance(reward, (list, tuple, np.ndarray)):
+                reward = np.asarray(reward).reshape(-1)[0]
+            reward = float(reward)
+        except Exception:
+            reward = 0.0
+
+        if not np.isfinite(reward):
+            self._log_sanitization("reward: replaced non-finite value with 0.0")
+            reward = 0.0
+
+        return reward
+
+    def _sanitize_transition(self, transition: Optional[Dict], context: str = 'stream') -> Dict:
+        """Return a safe-to-use transition dict with correct dimensions."""
+        base = transition if isinstance(transition, dict) else {}
+        if base is transition:
+            sanitized = dict(base)
+        else:
+            try:
+                sanitized = dict(base)
+            except Exception:
+                sanitized = {}
+
+        state_dim = self.state_dim
+        sanitized_state = self._sanitize_vector(
+            sanitized.get('state'), state_dim, f'{context}.state'
+        )
+        sanitized_next_state = self._sanitize_vector(
+            sanitized.get('next_state', sanitized_state), state_dim, f'{context}.next_state'
+        )
+
+        sanitized_action = self._sanitize_action(sanitized.get('action', 0))
+        sanitized_reward = self._sanitize_reward(sanitized.get('reward', 0.0))
+
+        sanitized['state'] = sanitized_state
+        sanitized['next_state'] = sanitized_next_state
+        sanitized['action'] = sanitized_action
+        sanitized['reward'] = sanitized_reward
+        sanitized['done'] = bool(sanitized.get('done', False))
+
+        return sanitized
     
     def process_transition(self, transition: Dict) -> str:
         """
         Process an incoming transition, incorporating active learning and distribution shift detection.
         """
+        if not isinstance(transition, dict):
+            self._log_sanitization("received non-mapping transition; dropped")
+            return 'dropped'
+
+        required_keys = ('state', 'next_state', 'action', 'reward')
+        missing = [key for key in required_keys if key not in transition]
+        if missing:
+            self._log_sanitization(f"transition missing keys {missing}; dropped")
+            return 'dropped'
+
         # 1. Normalize data: Convert any tensors to numpy/python types
         if isinstance(transition['state'], torch.Tensor):
             transition['state'] = transition['state'].cpu().numpy()
@@ -1122,10 +1269,13 @@ class OnlineTrainer:
             transition['action'] = transition['action'].cpu().numpy().item()
         if isinstance(transition['reward'], torch.Tensor):
             transition['reward'] = transition['reward'].cpu().numpy().item()
-        
+
+        # 1.5 Sanitize transition to guard against schema mismatches or invalid values
+        transition = self._sanitize_transition(transition, context='stream')
+
         # 2. Update counters and monitor distribution shift (FIX APPLIED)
         self.stats['total_transitions'] += 1
-        
+
         # Add the current state to the distribution shift detector
         self.shift_detector.add_state(transition['state'])
         
@@ -1155,9 +1305,12 @@ class OnlineTrainer:
             return 'queried'
             
         elif decision == 'query_batch':
-            self.query_buffer.extend(batch)
-            self.stats['total_queries'] += len(batch)
-            return f'queried_batch_{len(batch)}'
+            sanitized_batch = [
+                self._sanitize_transition(item, context='query_batch') for item in (batch or [])
+            ]
+            self.query_buffer.extend(sanitized_batch)
+            self.stats['total_queries'] += len(sanitized_batch)
+            return f'queried_batch_{len(sanitized_batch)}'
             
         elif decision == 'weak':
             self.weak_buffer.append(transition)
@@ -1201,9 +1354,10 @@ class OnlineTrainer:
 
     def add_labeled_transition(self, transition: Dict, source: str = 'expert'):
         """Add expert-labeled transition"""
-        transition['label_source'] = source
-        transition['label_time'] = time.time()
-        self.labeled_buffer.append(transition)
+        sanitized = self._sanitize_transition(transition, context='labeled')
+        sanitized['label_source'] = source
+        sanitized['label_time'] = time.time()
+        self.labeled_buffer.append(sanitized)
     
     def _training_loop(self):
         """Background training loop with mixed blocking/non-blocking approach."""
@@ -1251,13 +1405,24 @@ class OnlineTrainer:
 
         # Sample batch
         indices = np.random.choice(len(self.labeled_buffer), actual_batch_size, replace=True)
-        batch = [self.labeled_buffer[i] for i in indices]
+        batch = []
+        for idx in indices:
+            sanitized = self._sanitize_transition(self.labeled_buffer[idx], context='train')
+            try:
+                self.labeled_buffer[idx] = sanitized
+            except Exception:
+                pass
+            batch.append(sanitized)
 
-        # Convert to tensors
-        states = torch.stack([torch.FloatTensor(t['state']) for t in batch]).to(self.device)
-        actions = torch.LongTensor([t['action'] for t in batch]).to(self.device)
-        rewards = torch.FloatTensor([t['reward'] for t in batch]).to(self.device)
-        next_states = torch.stack([torch.FloatTensor(t['next_state']) for t in batch]).to(self.device)
+        # Convert to tensors with additional safeguards
+        try:
+            states = torch.stack([torch.FloatTensor(t['state']) for t in batch]).to(self.device)
+            actions = torch.LongTensor([t['action'] for t in batch]).to(self.device)
+            rewards = torch.FloatTensor([t['reward'] for t in batch]).to(self.device)
+            next_states = torch.stack([torch.FloatTensor(t['next_state']) for t in batch]).to(self.device)
+        except RuntimeError as tensor_error:
+            self._log_sanitization(f"batch tensorization failed ({tensor_error}); skipping training step")
+            return
 
         # ----------------- Model Training -----------------
         # Update dynamics model
@@ -1544,7 +1709,7 @@ class ProgressiveLearningScheduler:
 
 class DistributionShiftDetector:
     """检测患者群体分布偏移"""
-    
+
     def __init__(self, window_size=1000, shift_threshold=0.1):
         self.window_size = window_size
         self.shift_threshold = shift_threshold
@@ -1590,22 +1755,145 @@ class DistributionShiftDetector:
                 'affected_dimensions': [i for i, p in enumerate(p_values) if p < self.shift_threshold]
             }
 
+
+class StreamingDataCoordinator:
+    """Route transitions between the synthetic generator and user-provided data."""
+
+    def __init__(
+        self,
+        base_source: Optional[Callable[[], Optional[Dict]]],
+        max_external_queue: int = 8192,
+        error_cooldown: float = 5.0,
+    ):
+        self._base_source = base_source
+        self._queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=max_external_queue)
+        self._lock = Lock()
+        self._dropped = 0
+        self._last_error_log = 0.0
+        self._last_drop_log = 0.0
+        self._error_cooldown = max(0.5, float(error_cooldown))
+
+    def set_base_source(self, base_source: Optional[Callable[[], Optional[Dict]]]):
+        with self._lock:
+            self._base_source = base_source
+
+    def push_external(self, transition: Dict[str, Any], *, source: str = "custom", block: bool = False) -> bool:
+        """Inject custom transitions; returns True if enqueued."""
+        if not isinstance(transition, dict):
+            self._log_error(f"Rejected external transition from {source}: not a mapping")
+            return False
+
+        required_keys = {'state', 'next_state', 'action', 'reward'}
+        missing = [key for key in required_keys if key not in transition]
+        if missing:
+            self._log_error(
+                f"Rejected external transition from {source}: missing keys {missing}"
+            )
+            return False
+
+        payload = {
+            "transition": dict(transition),
+            "source": source,
+            "enqueue_time": time.time(),
+        }
+
+        try:
+            self._queue.put(payload, block=block, timeout=1.0 if block else 0.0)
+            return True
+        except queue.Full:
+            # Drop oldest and retry once to provide backpressure without blocking streams
+            dropped = False
+            try:
+                _ = self._queue.get_nowait()
+                dropped = True
+            except queue.Empty:
+                pass
+
+            try:
+                self._queue.put_nowait(payload)
+                if dropped:
+                    self._log_drop(source)
+                return True
+            except queue.Full:
+                self._log_drop(source, hard=True)
+                return False
+
+    def get_transition(self) -> Optional[Dict[str, Any]]:
+        """Return the next transition, preferring externally-supplied data."""
+        try:
+            payload = self._queue.get_nowait()
+            transition = payload.get("transition")
+            if isinstance(transition, dict):
+                return dict(transition)
+        except queue.Empty:
+            pass
+
+        base_source = None
+        with self._lock:
+            base_source = self._base_source
+
+        if base_source is None:
+            return None
+
+        try:
+            return base_source()
+        except Exception as exc:  # noqa: BLE001 - defensive logging for runtime data issues
+            self._log_error(f"Base data source error: {exc}")
+            return None
+
+    def has_external_backlog(self) -> bool:
+        return not self._queue.empty()
+
+    def flush_external(self) -> int:
+        flushed = 0
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+                flushed += 1
+            except queue.Empty:
+                break
+        return flushed
+
+    def _log_error(self, message: str):
+        now = time.time()
+        if now - self._last_error_log >= self._error_cooldown:
+            print(f"[StreamingDataCoordinator] {message}")
+            self._last_error_log = now
+
+    def _log_drop(self, source: str, *, hard: bool = False):
+        self._dropped += 1
+        now = time.time()
+        if now - self._last_drop_log >= self._error_cooldown:
+            kind = "dropped" if not hard else "rejected"
+            print(
+                f"[StreamingDataCoordinator] {kind} external transition from {source}; "
+                f"total_dropped={self._dropped}"
+            )
+            self._last_drop_log = now
+
 class OnlineDataStream:
     """Simulates streaming patient data"""
-    
-    def __init__(self, 
-                 data_source: Callable,
-                 stream_rate: float = 1.0,
-                 add_noise: bool = True):
+
+    def __init__(
+        self,
+        data_source: Optional[Callable[[], Optional[Dict]]],
+        stream_rate: float = 1.0,
+        add_noise: bool = True,
+        data_router: Optional[StreamingDataCoordinator] = None,
+    ):
         """
         Initialize data stream
-        
+
         Args:
             data_source: Function that returns transitions
             stream_rate: Transitions per second
             add_noise: Add realistic noise to transitions
         """
-        self.data_source = data_source
+        self.data_router = data_router
+        if self.data_router is None and data_source is not None:
+            self.data_router = StreamingDataCoordinator(data_source)
+
+        self._data_source = data_source
         self.stream_rate = stream_rate
         self.add_noise = add_noise
         self.is_streaming = False
@@ -1613,6 +1901,9 @@ class OnlineDataStream:
         self.callbacks = []
         self.training_lock = threading.Lock()
         self.last_train_time = 0
+        self._last_callback_error = 0.0
+        self._last_fetch_error = 0.0
+        self._error_cooldown = 5.0
 
     def add_callback(self, callback: Callable):
         """Add callback for new transitions"""
@@ -1638,21 +1929,32 @@ class OnlineDataStream:
             loop_start = time.perf_counter()
             
             # 获取和处理数据
-            transition = self.data_source()
+            transition = self._safe_fetch_transition()
             if transition is None:
                 time.sleep(0.1)
                 continue
-            
+
+            if not isinstance(transition, dict):
+                now = time.time()
+                if now - self._last_fetch_error >= self._error_cooldown:
+                    print("Data source returned non-mapping transition; skipping")
+                    self._last_fetch_error = now
+                time.sleep(0.05)
+                continue
+
             if self.add_noise:
                 transition = self._add_noise(transition)
-            
+
             # 调用回调函数
             for callback in self.callbacks:
                 try:
                     callback(transition)
                 except Exception as e:
-                    print(f"Callback error: {e}")
-            
+                    now = time.time()
+                    if now - self._last_callback_error >= self._error_cooldown:
+                        print(f"Callback error: {e}")
+                        self._last_callback_error = now
+
             # 精确的速率控制
             process_time = time.perf_counter() - loop_start
             target_interval = 1.0 / self.stream_rate
@@ -1661,6 +1963,20 @@ class OnlineDataStream:
             if sleep_time > 0:
                 time.sleep(sleep_time)
     
+    def _safe_fetch_transition(self) -> Optional[Dict[str, Any]]:
+        """Fetch transition from router or fallback with rate-limited error logging."""
+        try:
+            if self.data_router is not None:
+                return self.data_router.get_transition()
+            if self._data_source is not None:
+                return self._data_source()
+        except Exception as exc:  # noqa: BLE001 - defensive logging
+            now = time.time()
+            if now - self._last_fetch_error >= self._error_cooldown:
+                print(f"Data source error: {exc}")
+                self._last_fetch_error = now
+        return None
+
     def _add_noise(self, transition: Dict) -> Dict:
         """Add realistic noise to transition"""
         noisy_transition = transition.copy()
@@ -1680,71 +1996,193 @@ class OnlineDataStream:
 
 
 class ExpertSimulator:
-    """Simulates expert labeling with delay"""
-    
-    def __init__(self,
-                 label_delay: float = 2.0,
-                 accuracy: float = 0.95):
-        """
-        Initialize expert simulator
-        
-        Args:
-            label_delay: Seconds to wait before returning label
-            accuracy: Probability of correct label
-        """
+    """Simulates expert labeling with optional human confirmation hooks."""
+
+    def __init__(
+        self,
+        label_delay: float = 2.0,
+        accuracy: float = 0.95,
+        require_confirmation: bool = False,
+        confirmation_timeout: float = 30.0,
+    ):
+        """Initialize expert simulator."""
         self.label_delay = label_delay
         self.accuracy = accuracy
-        self.label_queue = queue.Queue()
+        self.require_confirmation = require_confirmation
+        self.confirmation_timeout = max(1.0, float(confirmation_timeout))
+        self.label_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self.is_running = True
+        self._pending_requests: Dict[str, Dict[str, Any]] = {}
+        self._pending_lock = Lock()
+        self._confirmation_notifier: Optional[Callable[[Dict[str, Any]], None]] = None
+        self._last_notify_log = 0.0
+        self._notify_cooldown = 5.0
         self.label_thread = threading.Thread(target=self._label_loop, daemon=True)
         self.label_thread.start()
-    
-    def request_label(self, transition: Dict, callback: Callable):
-        """Request expert label for transition"""
+
+    def configure_confirmation(self, enabled: bool):
+        self.require_confirmation = bool(enabled)
+
+    def register_confirmation_notifier(self, notifier: Callable[[Dict[str, Any]], None]):
+        """Register callback invoked when a label awaits expert confirmation."""
+        self._confirmation_notifier = notifier
+
+    def request_label(
+        self,
+        transition: Dict,
+        callback: Callable[[Dict[str, Any]], None],
+        *,
+        require_confirmation: Optional[bool] = None,
+    ) -> str:
+        """Request expert label for transition and return request id."""
+        request_id = uuid4().hex
+        confirmation_required = self.require_confirmation if require_confirmation is None else bool(require_confirmation)
         self.label_queue.put({
-            'transition': transition,
-            'callback': callback,
-            'request_time': time.time()
+            "transition": dict(transition),
+            "callback": callback,
+            "request_time": time.time(),
+            "request_id": request_id,
+            "require_confirmation": confirmation_required,
         })
-    
+        return request_id
+
+    def confirm_label(
+        self,
+        request_id: str,
+        *,
+        accepted: bool = True,
+        corrected_reward: Optional[float] = None,
+        override_transition: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Confirm or override a pending label; returns False if id invalid."""
+        with self._pending_lock:
+            pending = self._pending_requests.pop(request_id, None)
+
+        if pending is None:
+            return False
+
+        labeled = dict(pending["suggested_label"])
+        if override_transition:
+            labeled.update(dict(override_transition))
+        if corrected_reward is not None:
+            try:
+                labeled["reward"] = float(corrected_reward)
+            except Exception:
+                pass
+
+        labeled.setdefault("request_id", request_id)
+
+        if not accepted:
+            labeled["label_quality"] = "expert_rejected"
+        else:
+            if override_transition or corrected_reward is not None:
+                labeled["label_quality"] = "expert_corrected"
+            else:
+                labeled.setdefault("label_quality", "expert_verified")
+
+        self._safe_callback(pending["callback"], labeled)
+        return True
+
+    def pending_request_ids(self) -> List[str]:
+        with self._pending_lock:
+            return list(self._pending_requests.keys())
+
     def _label_loop(self):
         """Process labeling requests"""
         while self.is_running:
+            self._expire_stale_pending()
             try:
                 request = self.label_queue.get(timeout=1.0)
-                
-                # 添加调试
-                print(f"Expert labeling request received")
-                
-                # Simulate delay
-                time.sleep(self.label_delay)
-                
-                # Generate label (possibly with error)
-                labeled_transition = self._generate_label(request['transition'])
-                
-                # Call callback
-                request['callback'](labeled_transition)
-                
-                # 添加调试
-                print(f"Expert label provided")
-                
             except queue.Empty:
                 continue
-    
+
+            print("Expert labeling request received")
+            time.sleep(self.label_delay)
+
+            try:
+                labeled_transition = self._generate_label(request["transition"])
+            except Exception as exc:  # noqa: BLE001 - ensure loop survival
+                print(f"Expert label generation error: {exc}")
+                continue
+
+            labeled_transition.setdefault("request_id", request["request_id"])
+
+            if request.get("require_confirmation"):
+                self._stash_pending(request, labeled_transition)
+            else:
+                self._safe_callback(request["callback"], labeled_transition)
+
+    def _stash_pending(self, request: Dict[str, Any], labeled_transition: Dict[str, Any]):
+        labeled_transition = dict(labeled_transition)
+        labeled_transition.setdefault("label_quality", "awaiting_confirmation")
+        labeled_transition.setdefault("request_id", request["request_id"])
+        entry = {
+            "callback": request["callback"],
+            "suggested_label": labeled_transition,
+            "ready_time": time.time(),
+            "transition": request["transition"],
+        }
+        with self._pending_lock:
+            self._pending_requests[request["request_id"]] = entry
+
+        payload = {
+            "request_id": request["request_id"],
+            "transition": request["transition"],
+            "suggested_label": labeled_transition,
+        }
+        if self._confirmation_notifier:
+            try:
+                self._confirmation_notifier(payload)
+            except Exception as exc:  # noqa: BLE001 - logging only
+                print(f"Confirmation notifier error: {exc}")
+        else:
+            now = time.time()
+            if now - self._last_notify_log >= self._notify_cooldown:
+                print(
+                    "Expert label pending confirmation: "
+                    f"request_id={request['request_id']}"
+                )
+                self._last_notify_log = now
+
+    def _expire_stale_pending(self):
+        now = time.time()
+        expired_entries: List[Tuple[str, Dict[str, Any]]] = []
+        with self._pending_lock:
+            for req_id, entry in list(self._pending_requests.items()):
+                if now - entry.get("ready_time", now) >= self.confirmation_timeout:
+                    removed = self._pending_requests.pop(req_id, None)
+                    if removed is None:
+                        removed = entry
+                    expired_entries.append((req_id, removed))
+
+        for req_id, entry in expired_entries:
+            print(f"Expert confirmation timeout; auto-accepting request {req_id}")
+            suggested = dict(entry["suggested_label"])
+            suggested.setdefault("label_quality", "auto_confirmed")
+            self._safe_callback(entry["callback"], suggested)
+
+    def _safe_callback(self, callback: Callable[[Dict[str, Any]], None], labeled_transition: Dict[str, Any]):
+        try:
+            callback(labeled_transition)
+            print("Expert label provided")
+        except Exception as exc:  # noqa: BLE001 - consumer errors should not halt loop
+            print(f"Expert callback error: {exc}")
+
     def _generate_label(self, transition: Dict) -> Dict:
         """Generate expert label"""
         labeled = transition.copy()
-        
-        # Simulate expert providing true reward
+
+        confidence = max(0.0, min(1.0, self.accuracy))
+        labeled["confidence"] = confidence
+        labeled["auto_selected"] = True
+
         if np.random.rand() < self.accuracy:
-            # Correct label - compute true reward
             labeled['reward'] = self._compute_true_reward(transition)
             labeled['label_quality'] = 'expert_verified'
         else:
-            # Noisy label
             labeled['reward'] = transition.get('reward', 0) + np.random.normal(0, 0.1)
             labeled['label_quality'] = 'expert_noisy'
-        
+
         return labeled
     
     def _compute_true_reward(self, transition: Dict) -> float:
@@ -1774,6 +2212,8 @@ class ExpertSimulator:
         """Stop expert simulator"""
         self.is_running = False
         self.label_thread.join()
+        with self._pending_lock:
+            self._pending_requests.clear()
 
 from data import PatientDataGenerator
 def create_online_training_system(models: Dict,
@@ -1822,7 +2262,7 @@ def create_online_training_system(models: Dict,
     )
     
     # Create expert simulator
-    expert = ExpertSimulator(label_delay=0.1)
+    expert = ExpertSimulator(label_delay=0.1, require_confirmation=False, confirmation_timeout=45.0)
 
     # --- START: MODIFIED DATA GENERATION LOGIC ---
 
@@ -1870,13 +2310,14 @@ def create_online_training_system(models: Dict,
         return transition
 
     # --- END: MODIFIED DATA GENERATION LOGIC ---
-    
-    stream = OnlineDataStream(data_generator, stream_rate=stream_rate)
-    
+
+    data_router = StreamingDataCoordinator(data_generator)
+    stream = OnlineDataStream(None, stream_rate=stream_rate, data_router=data_router)
+
     # Connect components
     def process_transition(transition):
         status = trainer.process_transition(transition)
-        
+
         if 'queried' in status:
             # 修改回调以触发训练检查
             def labeled_callback(labeled_trans):
@@ -1885,16 +2326,18 @@ def create_online_training_system(models: Dict,
                 if len(trainer.labeled_buffer) >= min(trainer.batch_size, 8):
                     trainer.training_queue.put('train')
                     print(f"Labeled buffer size: {len(trainer.labeled_buffer)}, triggering training")
-            
+
             expert.request_label(transition, labeled_callback)
-    
+
     stream.add_callback(process_transition)
-    
+
     return {
         'trainer': trainer,
         'stream': stream,
         'expert': expert,
-        'active_learner': active_learner
+        'active_learner': active_learner,
+        'data_router': data_router,
+        'push_custom_transition': data_router.push_external,
     }
 
 

@@ -1728,6 +1728,8 @@ def register_model_handles(q_ensemble=None,
 def load_data_source(source_type: str,
                      file_path: Optional[str] = None,
                      n_patients: Optional[int] = None,
+                     column_mapping: Optional[dict] = None,
+                     feature_columns: Optional[List[str]] = None,
                      schema_path: Optional[str] = None,
                      schema_yaml: Optional[str] = None) -> dict:
     """Load data from specified source"""
@@ -1751,8 +1753,15 @@ def load_data_source(source_type: str,
             if not (file_path.endswith(".csv") or file_path.endswith(".parquet") or file_path.endswith(".xlsx") or file_path.endswith(".xls")):
                 return {"error": f"Unsupported file: {file_path}"}
 
+            # Manual column mapping overrides schema-based ingest.
+            if column_mapping or feature_columns:
+                df = data_manager.load_real_data_user_defined(
+                    file_path=file_path,
+                    column_mapping=column_mapping,
+                    feature_columns=feature_columns,
+                )
             # 有 YAML 走 adapters（强推荐）；否则走 schema-less 兜底
-            if schema_path or schema_yaml:
+            elif schema_path or schema_yaml:
                 df = data_manager.load_real_data_with_schema(
                     file_path=file_path,
                     file_type="csv" if file_path.endswith(".csv") else "parquet",
