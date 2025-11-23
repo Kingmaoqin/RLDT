@@ -5,11 +5,14 @@ agent_graph.py - 改进版：支持多种免费LLM API
 from typing import TypedDict, Annotated, List, Dict, Any
 import operator
 import os
+from collections import deque
+import json
+
+import numpy as np
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
-import json
 
 # 根据可用的API选择合适的LLM
 def get_llm():
@@ -68,7 +71,23 @@ def get_llm():
             temperature=0.7,
             max_tokens=150
         )
-    
+
+    # 选项5: Hugging Face Inference (使用 HUGGINGFACEHUB_API_TOKEN)
+    elif os.getenv("HUGGINGFACEHUB_API_TOKEN"):
+        from langchain_community.chat_models import ChatHuggingFace
+
+        model_id = os.getenv("HUGGINGFACE_MODEL", "meta-llama/Meta-Llama-3-8B-Instruct")
+        task = os.getenv("HUGGINGFACE_TASK", "text-generation")
+        temperature = float(os.getenv("HUGGINGFACE_TEMPERATURE", "0.7"))
+        max_tokens = int(os.getenv("HUGGINGFACE_MAX_TOKENS", "256"))
+
+        return ChatHuggingFace(
+            repo_id=model_id,
+            task=task,
+            huggingfacehub_api_token=os.getenv("HUGGINGFACEHUB_API_TOKEN"),
+            model_kwargs={"temperature": temperature, "max_new_tokens": max_tokens},
+        )
+
     # 默认: 使用本地模型
     else:
         print("警告: 未找到API密钥，使用本地小模型。")
@@ -76,6 +95,7 @@ def get_llm():
         print("- GROQ_API_KEY (推荐，完全免费)")
         print("- GOOGLE_API_KEY (Gemini，有免费额度)")
         print("- COHERE_API_KEY (有免费层)")
+        print("- HUGGINGFACEHUB_API_TOKEN (Hugging Face Inference)")
         
         from langchain_community.llms import Ollama
         try:
