@@ -5,6 +5,7 @@
 ## 文档
 - [系统流程说明](docs/system_workflow.md)
 - [部署指南：云端发布与 Hugging Face LLM 接入](docs/deployment_guide.md)
+- [Hugging Face Spaces 免费部署步骤](docs/huggingface_space_deploy.md)
 
 ## 快速开始
 ```bash
