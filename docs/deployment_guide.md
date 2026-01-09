@@ -81,11 +81,11 @@ python RL0910/enhanced_chat_ui.py --share --port 7860
 ## 免费云端部署：Hugging Face Spaces（零成本上线）
 Hugging Face Spaces 提供免费额度，可直接托管 Gradio 前端并使用 Hugging Face Inference。
 
-1. **准备仓库**：确保仓库包含 `requirements.txt`、`RL0910/enhanced_chat_ui.py` 和模型权重（或在 Space 中通过挂载/下载）。
+1. **准备仓库**：确保仓库包含 `app.py`、`requirements.txt`、`RL0910/` 和模型权重（或在 Space 中通过挂载/下载）。
 2. **创建 Space**：在 Hugging Face 主页选择 *New Space*，选择 **Gradio** 模板，勾选 Public（免费额度）。
 3. **推送代码**：将当前仓库（含 `requirements.txt`）推送到 Space 的 Git 远端。
 4. **配置变量**：在 Space 的 *Settings → Variables and secrets* 设置 `HUGGINGFACEHUB_API_TOKEN`、`HUGGINGFACE_MODEL` 等环境变量；如模型体积较大，可改为在启动脚本中从外部 URL 下载。
-5. **入口命令**：Space 会自动执行 `python RL0910/enhanced_chat_ui.py --port 7860`。如需自定义端口或关闭 `--share`，可在 Space 的 *App file* 中调整命令。
+5. **入口应用**：Space 会自动识别 `app.py` 中的 `demo`（Gradio 对象）并启动，无需手动指定 `--share` 或端口；`app.py` 会读取 `PORT` 环境变量并绑定 `0.0.0.0`。
 6. **访问链接**：构建完成后会生成永久公开链接，免费分享给团队；若需私有访问，可设置 Space 为 Private（需付费额度）。
 
 ## 使用远程 Hugging Face LLM
@@ -100,4 +100,3 @@ Hugging Face Spaces 提供免费额度，可直接托管 Gradio 前端并使用 
 - **端口无法访问**：确认云安全组/防火墙放行对应端口；如用反向代理，检查 upstream 配置。
 - **LLM 无响应或超时**：核对 Token 是否正确、模型是否支持 Inference API；可调小 `HUGGINGFACE_MAX_TOKENS`、增大超时。
 - **显存不足**：使用 Hugging Face Inference 即可避免本地显存限制；若仍需本地推理，可改用轻量模型并启用 `LOCAL_LLM_ENDPOINT`。
-
