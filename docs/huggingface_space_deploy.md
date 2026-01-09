@@ -4,7 +4,7 @@
 
 ## 1. 目录与关键文件
 - `app.py`：Spaces 的入口脚本，直接调用现有的 `create_gradio_interface()` 并在 `PORT`（Spaces 自动注入）上启动，无需命令行参数。
-- `requirements.txt`：Python 依赖列表，Spaces 会自动安装。
+- `requirements.txt`：Python 依赖列表，Spaces 会自动安装（其中包含 `transformers` / `sentencepiece` 以支持本地兜底模型加载）。
 - `RL0910/enhanced_chat_ui.py`：主界面与业务逻辑，保持不变。
 
 > 如果需要自带示例模型，可将模型权重放在仓库的 `output/models/` 下或在启动脚本中下载。
@@ -42,7 +42,7 @@ git push space main
   - `HUGGINGFACE_TEMPERATURE`、`HUGGINGFACE_MAX_TOKENS`
   - 如需其它云端模型，也可设置 `GOOGLE_API_KEY`、`COHERE_API_KEY`、`ANTHROPIC_API_KEY` 等，优先级在 `RL0910/agent_graph.py` 中定义。
 
-> 无需显式设置端口，Spaces 会自动注入 `PORT` 环境变量，`app.py` 会读取并绑定到 `0.0.0.0`。
+> 无需显式设置端口，Spaces 会自动注入 `PORT` 环境变量，`app.py` 会读取并绑定到 `0.0.0.0`。若未设置任何 API Key，程序会尝试加载本地兜底模型（会触发 `transformers` + `sentencepiece` 下载），在免费空间可能导致构建超时。
 
 ## 6. 数据与模型的放置方式
 - **轻量演示**：直接使用内置虚拟数据生成流程，无需上传文件。
